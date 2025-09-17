@@ -14,6 +14,22 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+import urllib.parse, re
+
+USERNAME_FROM_LINK = re.compile(
+    r"/people/([^/]+)/|[?&]user=([^&/#]+)", re.I
+)
+
+def normalize_username(raw: str) -> str:
+    s = raw.strip()
+    if s.startswith("http"):
+        m = USERNAME_FROM_LINK.search(s)
+        if m:
+            u = m.group(1) or m.group(2)
+            return urllib.parse.unquote(u)
+        # Links like /next/av/<id> are avatar IDs, not usernames → skip
+        return ""
+    return s
 
 # ==============================
 # Env / Defaults
@@ -447,14 +463,19 @@ def is_admin(inter: discord.Interaction) -> bool:
 # ==============================
 # Slash Commands
 # ==============================
-@tree.command(description="Enter the daily giveaway using your IMVU username.")
-@app_commands.describe(username="Your IMVU username (not a link)")
+@tree.command(name="enter", description="Enter the giveaway with your IMVU username")
 async def enter(interaction: discord.Interaction, username: str):
+    uname = normalize_username(username)
+    if not uname:
+        return await interaction.response.send_message(
+            "⚠️ Please enter your **IMVU username** (not a link). Example: `/enter mikeymoon`",
+            ephemeral=True
+        )
     await interaction.response.defer(ephemeral=True, thinking=True)
-    # first quick check to store record; eligibility is recomputed during draw
-    total, _ = await evaluate_user(username)
+    total, _ = await evaluate_user(uname)
     eligible = int(total >= int(get_rules().get("min_total", str(MIN_TOTAL_WISHLIST_ITEMS))))
-    upsert_entrant(interaction.user.id, username, total, eligible)
+    upsert_entrant(interaction.user.id, uname, total, eligible)
+    
     if total == 0:
         await interaction.followup.send(
             f"Saved **{username}**. I couldn't find a public wishlist or items yet — "
