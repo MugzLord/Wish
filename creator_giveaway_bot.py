@@ -259,7 +259,43 @@ def _extract_wishlist_links_from_profile(html: str) -> List[str]:
             res.append(u)
     return res
     # after: return (wl, pids[:sample_limit])
-print(f"[WISH] Using wishlist URL: {wl} | product_ids: {len(pids)} (user={uname})")
+async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_SAMPLE_LIMIT) -> Tuple[Optional[str], List[str]]:
+    uname = username.strip()
+    if not uname:
+        return (None, [])
+    timeout = aiohttp.ClientTimeout(total=12, connect=10)
+    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
+        # 1) PROFILE → discover wishlist links
+        for tmpl in PROFILE_CANDIDATES:
+            purl = tmpl.format(username=uname)
+            html = await _fetch_html(purl, s)
+            if not html:
+                continue
+            for wl in _extract_wishlist_links_from_profile(html):
+                whtml = await _fetch_html(wl, s)
+                if not whtml:
+                    continue
+                pids = _product_ids_from_html(whtml)
+                # ✅ wl exists here
+                print(f"[WISH] profile candidate OK: {wl} | items={len(pids)} | user={uname}")
+                if pids:
+                    return (wl, pids[:sample_limit])
+
+        # 2) FALLBACK → guessed wishlist URLs
+        for tmpl in WISHLIST_CANDIDATES:
+            wurl = tmpl.format(username=uname)
+            whtml = await _fetch_html(wurl, s)
+            if not whtml:
+                continue
+            pids = _product_ids_from_html(whtml)
+            # ✅ wurl exists here
+            print(f"[WISH] fallback tried: {wurl} | items={len(pids)} | user={uname}")
+            if pids:
+                return (wurl, pids[:sample_limit])
+
+    print(f"[WISH] no wishlist found | user={uname}")
+    return (None, [])
+
 
 
 def _product_ids_from_html(html: str) -> List[str]:
