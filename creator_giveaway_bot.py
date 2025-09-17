@@ -200,8 +200,15 @@ WISHLIST_CANDIDATES = [
     "https://www.imvu.com/people/{username}/wishlist/",
 ]
 
-PRODUCT_LINK_RX = re.compile(r'/shop/product(?:\.php\?products_id=|/)(\d+)', re.I)
-MANUFACTURER_RX = re.compile(r'manufacturers?_id(?:=|["\': ]*)(\d+)', re.I)
+# before
+# PRODUCT_LINK_RX = re.compile(r'/shop/product(?:\.php\?products_id=|/)(\d+)', re.I)
+
+# after (handles both forms and some variants)
+PRODUCT_LINK_RX = re.compile(
+    r'/shop/product(?:\.php\?products_id=|/)(\d+)|data-product-id=["\'](\d+)["\']',
+    re.I
+)
+
 
 async def _fetch_html(url: str, session: aiohttp.ClientSession, min_len=3500) -> Optional[str]:
     try:
@@ -235,17 +242,24 @@ def _extract_wishlist_links_from_profile(html: str) -> List[str]:
             seen.add(u)
             res.append(u)
     return res
+    # after: return (wl, pids[:sample_limit])
+print(f"[WISH] Using wishlist URL: {wl} | product_ids: {len(pids)} (user={uname})")
+
 
 def _product_ids_from_html(html: str) -> List[str]:
-    ids = [m.group(1) for m in PRODUCT_LINK_RX.finditer(html)]
-    # dedupe preserve order
-    seen = set()
-    res = []
+    ids = []
+    for m in PRODUCT_LINK_RX.finditer(html):
+        pid = m.group(1) or m.group(2)
+        if pid:
+            ids.append(pid)
+    # de-dupe preserving order
+    seen, res = set(), []
     for pid in ids:
         if pid not in seen:
             seen.add(pid)
             res.append(pid)
     return res
+
 
 async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_SAMPLE_LIMIT) -> Tuple[Optional[str], List[str]]:
     uname = username.strip()
