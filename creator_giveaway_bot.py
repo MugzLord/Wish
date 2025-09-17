@@ -296,6 +296,72 @@ async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_S
     print(f"[WISH] no wishlist found | user={uname}")
     return (None, [])
 
+from discord import app_commands
+import discord
+
+SUPPORT_REACTIONS = ["❤️", "⭐", "👍"]
+
+def get_min_total_items() -> int:
+    # reads from rules table; fallback to env/default
+    try:
+        return int(get_rules().get("min_total"))
+    except Exception:
+        return MIN_TOTAL_WISHLIST_ITEMS
+
+@tree.command(description="Post a giveaway announcement (supporting creators + how to join).")
+@app_commands.describe(
+    shop_url="Creator shop link (e.g. https://www.imvu.com/shop/web_search.php?manufacturers_id=...)",
+    creators="One per line or comma-separated (e.g. @Name, @Other, @handle)",
+    ping_role="(Optional) Role to ping, e.g. @Giveaway",
+    image_url="(Optional) Image/thumbnail URL for the embed"
+)
+async def announce(
+    interaction: discord.Interaction,
+    shop_url: str,
+    creators: str,
+    ping_role: discord.Role | None = None,
+    image_url: str | None = None
+):
+    # Build display for creators
+    # accepts commas or new lines; keeps @ if provided
+    raw = [x.strip() for x in creators.replace(",", "\n").splitlines() if x.strip()]
+    creators_block = "\n".join(raw) if raw else "—"
+
+    min_items = get_min_total_items()
+
+    embed = discord.Embed(
+        title="⚡ WISH — Weekly Giveaway",
+        description=(
+            f"[Open Creator Shop]({shop_url})\n\n"
+            f"**Today we support**\n{creators_block}\n\n"
+            f"**How to join**\n"
+            f"• Type `/enter <your_IMVU_username>`\n"
+            f"• Make your IMVU wishlist public\n"
+            f"• Have **≥ {min_items}** items on your wishlist\n\n"
+            f"**How it works**\n"
+            f"• Bot verifies the wishlist and draws fairly\n"
+            f"• No wishlist, no win\n"
+        ),
+        color=discord.Color.gold()
+    )
+
+    if image_url:
+        embed.set_thumbnail(url=image_url)
+
+    # Compose the ping (optional)
+    content = ping_role.mention if ping_role else None
+
+    await interaction.response.defer(thinking=True)
+    msg = await interaction.channel.send(content=content, embed=embed)
+
+    # Add starter reactions (optional)
+    try:
+        for r in SUPPORT_REACTIONS:
+            await msg.add_reaction(r)
+    except Exception:
+        pass
+
+    await interaction.followup.send("Announcement posted ✅", ephemeral=True)
 
 
 def _product_ids_from_html(html: str) -> List[str]:
