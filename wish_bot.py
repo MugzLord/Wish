@@ -516,6 +516,12 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
         giveaway_set_message(gid, msg.id)
         await interaction.followup.send(f"Giveaway posted ✅ (ID {gid})", ephemeral=True)
+        
+@tree.command(name="wish", description="Create a WISH giveaway (admin only).")
+async def wish_cmd(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+    await interaction.response.send_modal(WishSingle())
 
 # =========================
 # Draw/close watcher
