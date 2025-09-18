@@ -10,6 +10,7 @@ import aiohttp
 import discord
 from discord import ui
 from discord.ext import commands, tasks
+import re, aiohttp, urllib.parse
 # =========================
 # Config / ENV
 # =========================
@@ -507,9 +508,29 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                  f"• Click **Enter Giveaway** and submit your **IMVU username** + **up to 10 Product IDs/links**\n"
                  f"• Wishlist must be **public** and meet **min items/creator rules**")
 
+        parsed = urllib.parse.urlparse(prize)  # or shop_url if you collect separately
+        qs = urllib.parse.parse_qs(parsed.query)
+        mid = qs.get("manufacturers_id", [None])[0]
+        
+        creator_name = mid
+        if mid:
+            creator_name = await fetch_creator_name(mid)
+
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
         embed.set_footer(text="Only verified Participants are eligible • No wishlist, no win")
         embed.add_field(name="Participants", value="0", inline=True)
+        embed.add_field(name="Today we support", value=shop_url, inline=False)
+
+        
+async def fetch_creator_name(mid: str) -> str:
+    url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={mid}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            html = await resp.text()
+            m = re.search(r'by\s+([A-Za-z0-9_.-]+)<', html)
+            if m:
+                return m.group(1)
+    return mid
 
         await interaction.response.defer(thinking=True)
         msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
@@ -521,7 +542,7 @@ async def wish(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("Admins only.", ephemeral=True)
     await interaction.response.send_modal(WishSingle())
-
+    
 # =========================
 # Draw/close watcher
 # =========================
