@@ -689,12 +689,24 @@ async def enter(interaction: discord.Interaction, username: str):
 async def on_ready():
     init_db()
     try:
+        # 1) Clear global commands on Discord
+        tree.clear_commands(guild=None)
+        await tree.sync(guild=None)   # pushes the cleared set (removes old globals)
+
+        # 2) Sync the commands you *do* define now
+        #    (global sync is fine; or per-guild if you prefer)
         await tree.sync()
-        print("Slash commands synced.")
+        # Optionally: per-guild for instant updates
+        # for g in bot.guilds:
+        #     await tree.sync(guild=g)
+
+        print("Slash commands cleared & re-synced.")
     except Exception as e:
         print("Slash sync failed:", e)
+
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     if not giveaway_watcher.is_running():
         giveaway_watcher.start()
+
 
 bot.run(TOKEN)
