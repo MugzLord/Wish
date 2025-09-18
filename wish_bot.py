@@ -461,7 +461,7 @@ async def update_giveaway_counter_embed(giveaway_id: int):
         else:
             new.add_field(name=f.name, value=f.value, inline=f.inline)
     if not has_field:
-        new.add_field(name="Entrants", value=str(count), inline=True)
+        new.add_field(name="Entrants", value="0", inline=True)
     if e.thumbnail and e.thumbnail.url:
         new.set_thumbnail(url=e.thumbnail.url)
     await msg.edit(embed=new, view=EnterButton(giveaway_id))
@@ -634,35 +634,5 @@ async def on_ready():
     if not giveaway_watcher.is_running():
         giveaway_watcher.start()
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-
-    
-@tree.command(name="wish", description="Create a WISH giveaway (admin only).")
-async def wish(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("Admins only.", ephemeral=True)
-    await interaction.response.send_modal(WishSingle())  # <-- your single admin modal class
-
-# ---- caching helpers used above ----
-def cache_put(product_id: str, creator_id: Optional[str]):  # redefined above already; kept to avoid NameError
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO cache_products(product_id,creator_id,fetched_at) VALUES(?,?,?) "
-            "ON CONFLICT(product_id) DO UPDATE SET creator_id=excluded.creator_id, fetched_at=excluded.fetched_at;",
-            (product_id, creator_id or "", datetime.now(timezone.utc).isoformat())
-        )
-
-def cache_get(product_id: str) -> Optional[str]:
-    with db() as conn:
-        cur = conn.execute("SELECT creator_id, fetched_at FROM cache_products WHERE product_id=?", (product_id,))
-        row = cur.fetchone()
-    if not row: return None
-    creator_id, fetched_at = row
-    try:
-        ts = datetime.fromisoformat(fetched_at.replace("Z","")).replace(tzinfo=timezone.utc)
-    except Exception:
-        ts = datetime.now(timezone.utc) - timedelta(days=9999)
-    if datetime.now(timezone.utc) - ts > timedelta(hours=PRODUCT_CACHE_TTL_HOURS):
-        return None
-    return creator_id
 
 bot.run(TOKEN)
