@@ -685,28 +685,37 @@ async def enter(interaction: discord.Interaction, username: str):
 # =========================
 # Lifecycle
 # =========================
+# ---- hard prune old slash commands and resync ----
+PRUNE_COMMANDS = True   # set False later if you want
+
 @bot.event
 async def on_ready():
     init_db()
     try:
-        # 1) Clear global commands on Discord
-        tree.clear_commands(guild=None)
-        await tree.sync(guild=None)   # pushes the cleared set (removes old globals)
+        if PRUNE_COMMANDS:
+            # 1) Clear GLOBAL commands
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync(guild=None)
 
-        # 2) Sync the commands you *do* define now
-        #    (global sync is fine; or per-guild if you prefer)
-        await tree.sync()
-        # Optionally: per-guild for instant updates
-        # for g in bot.guilds:
-        #     await tree.sync(guild=g)
+            # 2) Clear commands per guild (instant removal in that server)
+            for g in bot.guilds:
+                bot.tree.clear_commands(guild=g)
+                await bot.tree.sync(guild=g)
 
-        print("Slash commands cleared & re-synced.")
+        # 3) Now register ONLY the commands defined in this file
+        #    (make sure only /wish (and /settings if you want) are defined)
+        await bot.tree.sync()                 # global
+        for g in bot.guilds:
+            await bot.tree.sync(guild=g)      # and per-guild for instant visibility
+
+        print("Slash commands pruned & re-synced.")
     except Exception as e:
         print("Slash sync failed:", e)
 
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     if not giveaway_watcher.is_running():
         giveaway_watcher.start()
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
 
 
 bot.run(TOKEN)
