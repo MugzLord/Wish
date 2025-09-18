@@ -32,8 +32,13 @@ except Exception:
     LOCAL_TZ = timezone(timedelta(hours=3))  # fallback
 
 INTENTS = discord.Intents.default()
+INTENTS.message_content = True   # allow reading normal messages (and silences the warning)
+INTENTS.guilds = True
+INTENTS.members = True
+
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
 tree = bot.tree
+
 
 # =========================
 # Database
