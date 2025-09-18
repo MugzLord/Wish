@@ -404,14 +404,19 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
         await interaction.followup.send(f"✅ Entered as **{uname}** (Saved product **{first_ok}**).", ephemeral=True)
         
         
-                first_ok = next((pid for pid in ids if pid in product_ids), ids[0])
-                try:
-                    giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
-                except sqlite3.IntegrityError:
-                    return await interaction.followup.send("You’re already entered ✅", ephemeral=True)
-        
-                await update_giveaway_counter_embed(gid)
-                await interaction.followup.send(f"✅ Entered as **{uname}** (Product **{first_ok}** verified).", ephemeral=True)
+        # --- simplified: skip wishlist scraping, just trust entrant input ---
+        first_ok = ids[0]
+        try:
+            giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
+        except sqlite3.IntegrityError:
+            return await interaction.followup.send("You’re already registered ✅", ephemeral=True)
+
+        await update_giveaway_counter_embed(gid)
+        await interaction.followup.send(
+            f"✅ Registered as **{uname}** (saved product **{first_ok}**).",
+            ephemeral=True
+        )
+
 
 class EnterButton(ui.View):
     def __init__(self, giveaway_id: int, disabled: bool = False, timeout=None):
