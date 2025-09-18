@@ -307,25 +307,33 @@ async def evaluate_user(username: str):
     return (len(product_ids), per)
 
 def _eligible_by_creator_rule(per_creator: Dict[str,int], rules: Dict[str,str], allowed_creators: List[str]) -> bool:
-    mode = rules.get("mode","NONE").upper()
-    if mode == "NONE" or not allowed_creors:
+    mode = rules.get("mode", "NONE").upper()
+    if mode == "NONE" or not allowed_creators:
         return True
+
     allowed = set(allowed_creators)
-    if mode in ("ANY","EACH"):
-        thr = max(1, int(rules.get("threshold","1")))
+
+    if mode in ("ANY", "EACH"):
+        thr = max(1, int(rules.get("threshold", "1")))
         if mode == "ANY":
-            return any(per_creator.get(cid,0) >= thr for cid in allowed)
-        return all(per_creator.get(cid,0) >= thr for cid in allowed)
+            return any(per_creator.get(cid, 0) >= thr for cid in allowed)
+        # EACH
+        return all(per_creator.get(cid, 0) >= thr for cid in allowed)
+
     if mode == "MAP":
         try:
-            req = json.loads(rules.get("map_json","{}"))
+            req = json.loads(rules.get("map_json", "{}"))
         except Exception:
             req = {}
-        if not req: return True
+        if not req:
+            return True
         for cid, need in req.items():
-            if per_creator.get(str(cid),0) < int(need): return False
+            if per_creator.get(str(cid), 0) < int(need):
+                return False
         return True
+
     return True
+
 
 # =========================
 # Input sanitizers
