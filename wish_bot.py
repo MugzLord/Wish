@@ -1,7 +1,8 @@
-# wish_bot.py — ⚡ WISH: verified IMVU wishlist giveaways with entry button + modals
-# pip install -r requirements.txt
+# ⚡ WISH — IMVU wishlist giveaway bot (buttons + modals + live counter)
+# Start with: python wish_bot.py
+# Env vars: DISCORD_TOKEN (required), GIVEAWAY_CHANNEL_ID (optional), TIMEZONE, DRAW_HOUR_LOCAL, WIN_COOLDOWN_DAYS
 
-import os, re, json, random, sqlite3, asyncio, urllib.parse
+import os, re, json, sqlite3, asyncio, random, urllib.parse
 from typing import Optional, Tuple, List, Dict
 from datetime import datetime, timedelta, timezone
 
@@ -17,8 +18,8 @@ TOKEN = os.getenv("DISCORD_TOKEN") or ""
 if not TOKEN:
     raise RuntimeError("Set DISCORD_TOKEN")
 
-ANNOUNCE_CHANNEL_ID = int(os.getenv("GIVEAWAY_CHANNEL_ID", "0"))
-DRAW_HOUR_LOCAL = int(os.getenv("DRAW_HOUR_LOCAL", "18"))
+GIVEAWAY_CHANNEL_ID = int(os.getenv("GIVEAWAY_CHANNEL_ID", "0"))
+DRAW_HOUR_LOCAL = int(os.getenv("DRAW_HOUR_LOCAL", "18"))          # not used for modal-timed giveaways, kept for future
 WIN_COOLDOWN_DAYS = int(os.getenv("WIN_COOLDOWN_DAYS", "7"))
 
 try:
@@ -28,16 +29,18 @@ except Exception:
     LOCAL_TZ = timezone(timedelta(hours=3))  # UTC+3 fallback
 
 DB_PATH = os.getenv("DB_PATH", "wish.db")
+
 PRODUCT_SAMPLE_LIMIT = int(os.getenv("PRODUCT_SAMPLE_LIMIT", "60"))
-PRODUCT_CONCURRENCY = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
+PRODUCT_CONCURRENCY  = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
 
+# Discord
 INTENTS = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
 tree = bot.tree
 
 # =========================
-# DB
+# Database
 # =========================
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -83,7 +86,8 @@ def init_db():
         );
         """)
         conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('last_draw_date','');")
-        # Giveaway + entries
+
+        # giveaways + entries
         conn.execute("""
         CREATE TABLE IF NOT EXISTS giveaways(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,9 +96,9 @@ def init_db():
           prize TEXT NOT NULL,
           description TEXT,
           winners INTEGER NOT NULL,
-          end_at TEXT NOT NULL,
+          end_at TEXT NOT NULL,        -- ISO UTC
           created_by TEXT NOT NULL,
-          status TEXT DEFAULT 'OPEN' -- OPEN|DONE|CANCELED
+          status TEXT DEFAULT 'OPEN'   -- OPEN|DONE|CANCELED
         );
         """)
         conn.execute("""
@@ -108,7 +112,7 @@ def init_db():
         );
         """)
 
-        # default rules
+        # default rule values
         for k, v in [("mode","NONE"), ("threshold","10"), ("min_total","10"), ("map_json","{}")]:
             conn.execute("INSERT OR IGNORE INTO rules(key,value) VALUES(?,?)", (k, v))
 
@@ -129,16 +133,6 @@ def list_creators() -> List[tuple]:
     with db() as conn:
         cur = conn.execute("SELECT creator_id,label FROM creators ORDER BY creator_id;")
         return cur.fetchall()
-
-def set_meta(k: str, v: str):
-    with db() as conn:
-        conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value;", (k, v))
-
-def get_meta(k: str, default=""):
-    with db() as conn:
-        cur = conn.execute("SELECT value FROM meta WHERE key=?", (k,))
-        row = cur.fetchone()
-        return row[0] if row and row[0] is not None else default
 
 def upsert_entrant(discord_id: int, username: str, total_items: int, eligible: int):
     now = datetime.now(timezone.utc).isoformat()
@@ -163,7 +157,7 @@ def set_winner(discord_id: int):
 def recent_win_cutoff() -> datetime:
     return datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS)
 
-# Giveaways/Entries
+# Giveaways/entries helpers
 def giveaway_insert(channel_id: int, prize: str, desc: str, winners: int, end_at_iso: str, created_by: int) -> int:
     with db() as conn:
         cur = conn.execute("""
@@ -193,10 +187,10 @@ def giveaway_count_entries(gid: int) -> int:
         return int(cur.fetchone()[0])
 
 # =========================
-# Scraping / Validation
+# Scraping & eligibility
 # =========================
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 PROFILE_CANDIDATES = [
@@ -216,8 +210,7 @@ def _product_ids_from_html(html: str) -> List[str]:
     seen, out = set(), []
     for pid in ids:
         if pid not in seen:
-            seen.add(pid)
-            out.append(pid)
+            seen.add(pid); out.append(pid)
     return out
 
 async def _fetch_html(url: str, session: aiohttp.ClientSession, min_len=3000) -> Optional[str]:
@@ -244,8 +237,7 @@ def _extract_wishlist_links_from_profile(html: str) -> List[str]:
             out.append(href)
     seen, res = set(), []
     for u in out:
-        if u not in seen:
-            seen.add(u); res.append(u)
+        if u not in seen: seen.add(u); res.append(u)
     return res
 
 async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_SAMPLE_LIMIT) -> Tuple[Optional[str], List[str]]:
@@ -254,6 +246,7 @@ async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_S
         return (None, [])
     timeout = aiohttp.ClientTimeout(total=12, connect=10)
     async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
+        # discover via profile
         for tmpl in PROFILE_CANDIDATES:
             purl = tmpl.format(username=uname)
             html = await _fetch_html(purl, s)
@@ -264,6 +257,7 @@ async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_S
                 pids = _product_ids_from_html(whtml)
                 if pids:
                     return (wl, pids[:sample_limit])
+        # direct guesses
         for tmpl in WISHLIST_CANDIDATES:
             wurl = tmpl.format(username=uname)
             whtml = await _fetch_html(wurl, s)
@@ -309,9 +303,11 @@ def cache_get(product_id: str) -> Optional[str]:
 
 def cache_put(product_id: str, creator_id: Optional[str]):
     with db() as conn:
-        conn.execute("INSERT INTO cache_products(product_id,creator_id,fetched_at) VALUES(?,?,?) "
-                     "ON CONFLICT(product_id) DO UPDATE SET creator_id=excluded.creator_id, fetched_at=excluded.fetched_at;",
-                     (product_id, creator_id or "", datetime.now(timezone.utc).isoformat()))
+        conn.execute(
+            "INSERT INTO cache_products(product_id,creator_id,fetched_at) VALUES(?,?,?) "
+            "ON CONFLICT(product_id) DO UPDATE SET creator_id=excluded.creator_id, fetched_at=excluded.fetched_at;",
+            (product_id, creator_id or "", datetime.now(timezone.utc).isoformat())
+        )
 
 async def evaluate_user(username: str) -> Tuple[int, Dict[str,int]]:
     wl_url, product_ids = await wishlist_url_and_products(username)
@@ -365,7 +361,6 @@ def normalize_username(raw: str) -> str:
 PROD_ID_RX = re.compile(r'(\d{5,})')
 def parse_product_ids(raw: str, limit: int = 10) -> List[str]:
     ids = PROD_ID_RX.findall(raw or "")
-    # dedupe, keep order
     seen, out = set(), []
     for pid in ids:
         if pid not in seen:
@@ -374,17 +369,22 @@ def parse_product_ids(raw: str, limit: int = 10) -> List[str]:
     return out
 
 # =========================
-# UI — Enter button + modal
+# UI — Entrant button + modal
 # =========================
 class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
     def __init__(self, giveaway_id: int):
         super().__init__()
         self.gid = giveaway_id
 
-    imvu_username = ui.TextInput(label="IMVU username", placeholder="e.g., mikeymoon (not a link)", required=True, max_length=40)
-    product_ids   = ui.TextInput(label="Product IDs/Links (max 10)", style=discord.TextStyle.paragraph,
-                                 placeholder="12345678, https://www.imvu.com/shop/product/87654321\n(one per line or comma-separated)",
-                                 required=True, max_length=1000)
+    imvu_username = ui.TextInput(
+        label="IMVU username",
+        placeholder="e.g., mikeymoon (not a link)",
+        required=True, max_length=40)
+    product_ids   = ui.TextInput(
+        label="Product IDs/Links (max 10)",
+        style=discord.TextStyle.paragraph,
+        placeholder="12345678, https://www.imvu.com/shop/product/87654321\n(one per line or comma-separated)",
+        required=True, max_length=1000)
 
     async def on_submit(self, interaction: discord.Interaction):
         gid = self.gid
@@ -392,17 +392,21 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
         ids   = parse_product_ids(str(self.product_ids), limit=10)
 
         if not uname or not ids:
-            return await interaction.response.send_message("Enter a valid **IMVU username** and at least **one** product ID/link.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Enter a valid **IMVU username** and at least **one** product ID/link.",
+                ephemeral=True
+            )
 
-        # one entry per user per giveaway?
+        # already entered?
         with db() as conn:
-            cur = conn.execute("SELECT 1 FROM giveaway_entries WHERE giveaway_id=? AND discord_id=?", (gid, str(interaction.user.id)))
+            cur = conn.execute("SELECT 1 FROM giveaway_entries WHERE giveaway_id=? AND discord_id=?",
+                               (gid, str(interaction.user.id)))
             if cur.fetchone():
                 return await interaction.response.send_message("You’ve already entered this giveaway ✅", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # Verify wishlist + min items
+        # verify wishlist & rules
         total, per_creator = await evaluate_user(uname)
         rules = get_rules()
         min_items = int(rules.get("min_total","10"))
@@ -410,14 +414,13 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
         allowed = [cid for (cid, _) in list_creators()]
         creator_ok = _eligible_by_creator_rule(per_creator, rules, allowed)
 
-        # Verify at least one provided product id is on their wishlist sample
         wl_url, product_ids = await wishlist_url_and_products(uname)
         has_any = any(pid in product_ids for pid in ids) if product_ids else False
 
         if not wl_url or not product_ids:
             return await interaction.followup.send("I couldn't find a **public wishlist** for that username.", ephemeral=True)
         if not has_any:
-            return await interaction.followup.send("None of those product IDs/links were found on your wishlist sample. Please check and try again.", ephemeral=True)
+            return await interaction.followup.send("None of those product IDs/links were found on your wishlist sample. Check and try again.", ephemeral=True)
         if not (meets_min and creator_ok):
             return await interaction.followup.send(
                 f"Saved your details, but you’re **not eligible** yet.\n"
@@ -426,18 +429,15 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
                 ephemeral=True
             )
 
-        # Store entry (first verified product id)
-        try:
-            first_ok = next(pid for pid in ids if pid in product_ids)
-        except StopIteration:
-            first_ok = ids[0]
+        # store entry
+        first_ok = next((pid for pid in ids if pid in product_ids), ids[0])
         try:
             giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
         except sqlite3.IntegrityError:
             return await interaction.followup.send("You’re already entered ✅", ephemeral=True)
 
         await update_giveaway_counter_embed(gid)
-        await interaction.followup.send(f"✅ Entered as **{uname}** (Product **{first_ok}** on your wishlist).", ephemeral=True)
+        await interaction.followup.send(f"✅ Entered as **{uname}** (Product **{first_ok}** verified).", ephemeral=True)
 
 class EnterButton(ui.View):
     def __init__(self, giveaway_id: int, disabled: bool = False, timeout=None):
@@ -467,7 +467,7 @@ async def update_giveaway_counter_embed(giveaway_id: int):
     new = discord.Embed(title=e.title, description=e.description, color=e.color)
     if e.footer and e.footer.text:
         new.set_footer(text=e.footer.text)
-    # copy fields and overwrite Entrants
+    # copy fields, overwrite Entrants
     has_field = False
     for f in e.fields:
         if f.name == "Entrants":
@@ -482,7 +482,7 @@ async def update_giveaway_counter_embed(giveaway_id: int):
     await msg.edit(embed=new, view=EnterButton(giveaway_id))
 
 # =========================
-# Admin: /wish with 2-step modals
+# /wish two-step flow (modal → button → modal)
 # =========================
 DUR_RX = re.compile(r'^\s*(\d+)\s*([smhdw])\s*$', re.I)
 def parse_duration_to_seconds(s: str) -> int:
@@ -494,6 +494,9 @@ def parse_duration_to_seconds(s: str) -> int:
 
 def is_admin(inter: discord.Interaction) -> bool:
     return bool(inter.user.guild_permissions.administrator)
+
+# Step-1 temporary store (per admin)
+WISH_STEP1_STATE: Dict[int, Dict] = {}
 
 class WishStep1(ui.Modal, title="Create WISH Giveaway — Step 1/2"):
     duration = ui.TextInput(label="Duration", placeholder="24h, 3d, 45m, 1w", required=True)
@@ -512,14 +515,31 @@ class WishStep1(ui.Modal, title="Create WISH Giveaway — Step 1/2"):
             k = max(1, int(str(self.winners)))
         except Exception as e:
             return await interaction.response.send_message(f"Invalid: {e}", ephemeral=True)
-        step2 = WishStep2(
-            opener_id=self.opener_id,
-            secs=secs, winners=k,
-            prize=str(self.prize).strip(),
-            announce=str(self.announce or "").strip(),
-            pingrole=str(self.pingrole or "").strip()
+
+        WISH_STEP1_STATE[interaction.user.id] = {
+            "secs": secs,
+            "winners": k,
+            "prize": str(self.prize).strip(),
+            "announce": str(self.announce or "").strip(),
+            "pingrole": str(self.pingrole or "").strip(),
+        }
+
+        await interaction.response.send_message(
+            "Step 1 saved. Click **Continue** to complete setup (Step 2).",
+            view=WishContinueView(interaction.user.id),
+            ephemeral=True
         )
-        await interaction.response.send_modal(step2)
+
+class WishContinueView(ui.View):
+    def __init__(self, opener_id: int, timeout=300):
+        super().__init__(timeout=timeout)
+        self.opener_id = opener_id
+
+    @ui.button(label="Continue", style=discord.ButtonStyle.primary, custom_id="wish:continue")
+    async def cont(self, interaction: discord.Interaction, btn: ui.Button):
+        if interaction.user.id != self.opener_id:
+            return await interaction.response.send_message("This wizard isn’t yours.", ephemeral=True)
+        await interaction.response.send_modal(WishStep2(opener_id=self.opener_id))
 
 class WishStep2(ui.Modal, title="Create WISH Giveaway — Step 2/2"):
     shops    = ui.TextInput(label="Shops to support (IDs or shop URLs, comma/lines)", style=discord.TextStyle.paragraph, required=False)
@@ -528,23 +548,24 @@ class WishStep2(ui.Modal, title="Create WISH Giveaway — Step 2/2"):
     mode     = ui.TextInput(label="Creator rule (NONE/ANY/EACH/MAP)", placeholder="NONE", required=True, max_length=8)
     thrmap   = ui.TextInput(label="Threshold (ANY/EACH) or MAP JSON", required=False)
 
-    def __init__(self, opener_id: int, secs: int, winners: int, prize: str, announce: str, pingrole: str):
+    def __init__(self, opener_id: int):
         super().__init__()
         self.opener_id = opener_id
-        self.secs = secs
-        self.winners = winners
-        self.prize = prize
-        self.announce = announce
-        self.pingrole = pingrole
 
     async def on_submit(self, interaction: discord.Interaction):
-        if interaction.user.id != self.opener_id:
-            return await interaction.response.send_message("This modal isn’t yours.", ephemeral=True)
+        # must have step1 saved
+        s1 = WISH_STEP1_STATE.pop(interaction.user.id, None)
+        if not s1:
+            return await interaction.response.send_message("Step 1 expired. Run /wish again.", ephemeral=True)
+
+        secs, winners = s1["secs"], s1["winners"]
+        prize, announce, pingrole = s1["prize"], s1["announce"], s1["pingrole"]
 
         # rules & creators
         mode = str(self.mode).strip().upper() or "NONE"
         set_rule("mode", mode)
         set_rule("min_total", str(max(1, int(str(self.minitems or '10')))))
+
         thr = str(self.thrmap or "").strip()
         if mode in ("ANY","EACH"):
             try: set_rule("threshold", str(max(1, int(thr or "1"))))
@@ -553,30 +574,31 @@ class WishStep2(ui.Modal, title="Create WISH Giveaway — Step 2/2"):
             try: json.loads(thr); set_rule("map_json", thr)
             except: pass
 
-        # add/refresh creators from shops field
+        # add creators from shops field
         ids = re.findall(r'(\d{5,})', str(self.shops or ""))
-        for cid in dict.fromkeys(ids).keys():
+        for cid in dict.fromkeys(ids):
             add_creator(cid, None)
 
-        # create giveaway row first
-        end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=self.secs)
-        gid = giveaway_insert(interaction.channel.id, self.prize, self.announce, self.winners, end_at_utc.isoformat(), interaction.user.id)
+        # create giveaway row
+        end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        gid = giveaway_insert(interaction.channel.id, prize, announce, winners, end_at_utc.isoformat(), interaction.user.id)
 
         # build embed
         end_rel = discord.utils.format_dt(end_at_utc, style='R')
         creators_txt = ", ".join([f"{cid}" for cid,_ in list_creators()]) or "—"
+
         embed = discord.Embed(
             title="⚡ WISH — Giveaway",
             description=(
-                (self.pingrole + "\n\n" if self.pingrole else "") +
-                f"**Prize:** {self.prize}\n"
-                f"**Winners:** {self.winners}\n"
+                (pingrole + "\n\n" if pingrole else "") +
+                f"**Prize:** {prize}\n"
+                f"**Winners:** {winners}\n"
                 f"**Ends:** {end_rel}\n\n"
                 f"**Today we support:** {creators_txt}\n\n"
                 f"**How to join**\n"
                 f"• Click **Enter Giveaway** and submit your **IMVU username** + **up to 10 Product IDs/links**\n"
                 f"• Wishlist must be **public** and meet **min items/creator rules**\n\n"
-                f"{self.announce or ''}"
+                f"{announce or ''}"
             ),
             color=discord.Color.gold()
         )
@@ -597,7 +619,7 @@ async def wish(interaction: discord.Interaction):
     await interaction.response.send_modal(WishStep1(opener_id=interaction.user.id))
 
 # =========================
-# Eligibility & draw
+# Draw/close watcher
 # =========================
 async def refresh_and_collect_eligibles() -> List[int]:
     rows = all_entrants()
@@ -616,9 +638,9 @@ async def refresh_and_collect_eligibles() -> List[int]:
                 except:
                     lw = datetime.now(timezone.utc) - timedelta(days=9999)
                 if lw > recent_win_cutoff():
-                    await asyncio.sleep(0.1); continue
+                    await asyncio.sleep(0.05); continue
             elig_ids.append(int(discord_id))
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.05)
     return elig_ids
 
 @tasks.loop(seconds=30)
@@ -634,7 +656,7 @@ async def giveaway_watcher():
 
     for gid, ch_id, msg_id, winners, prize in due:
         channel = bot.get_channel(int(ch_id))
-        # disable the button on the original message
+        # disable button on original message
         try:
             msg = await channel.fetch_message(int(msg_id))
             await msg.edit(view=EnterButton(gid, disabled=True))
@@ -659,41 +681,48 @@ async def giveaway_watcher():
         giveaway_mark_done(gid)
 
 # =========================
-# Utility commands (optional)
+# Utilities
 # =========================
-@tree.command(description="Show current settings.")
-async def settings(interaction: discord.Interaction):
+@tree.command(name="settings", description="Show current settings.")
+async def settings_cmd(interaction: discord.Interaction):
     r = get_rules()
     creators_txt = ", ".join([f"{cid}" + (f" ({lbl})" if lbl else "") for cid,lbl in list_creators()]) or "—"
     await interaction.response.send_message(
         f"Mode: **{r.get('mode')}** | Threshold: **{r.get('threshold')}**\n"
         f"Min total items: **{r.get('min_total')}**\n"
         f"MAP: `{r.get('map_json')}`\n"
-        f"Creators: {creators_txt}", ephemeral=True)
+        f"Creators: {creators_txt}",
+        ephemeral=True
+    )
 
-@tree.command(description="Enter via text (fallback).")
-async def enter(interaction: discord.Interaction, username: str):
-    uname = normalize_username(username)
-    if not uname:
-        return await interaction.response.send_message("Enter your **IMVU username** (not a link).", ephemeral=True)
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    total, _ = await evaluate_user(uname)
-    min_items = int(get_rules().get("min_total","10"))
-    upsert_entrant(interaction.user.id, uname, total, int(total>=min_items))
-    await interaction.followup.send(f"Saved **{uname}** — found {total} wishlist items (re-checked at draw).", ephemeral=True)
+@tree.command(name="sync", description="Admin: re-register slash commands here.")
+async def sync_cmd(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+    await tree.sync(guild=interaction.guild)
+    await interaction.response.send_message("✅ Synced for this server.", ephemeral=True)
 
 # =========================
 # Lifecycle
 # =========================
 @bot.event
 async def on_ready():
-    # Sync slash commands to all guilds the bot is in
+    init_db()
     try:
-        synced = await tree.sync()
-        print(f"Synced {len(synced)} command(s).")
+        # Ensure only the commands in this file are registered for this guild (fast)
+        for g in bot.guilds:
+            tree.clear_commands(guild=g)
+            await tree.sync(guild=g)
+        # Register current set
+        await tree.sync()
+        for g in bot.guilds:
+            await tree.sync(guild=g)
+        print("Slash commands pruned & re-synced.")
     except Exception as e:
-        print("Command sync failed:", e)
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+        print("Slash sync failed:", e)
 
+    if not giveaway_watcher.is_running():
+        giveaway_watcher.start()
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 bot.run(TOKEN)
