@@ -1,1 +1,2 @@
-worker: python creator_giveaway_bot.py
+worker: python wish_bot.py
+
