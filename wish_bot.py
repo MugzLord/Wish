@@ -10,7 +10,7 @@ import aiohttp
 import discord
 from discord import ui
 from discord.ext import commands, tasks
-import re, aiohttp, urllib.parse
+
 # =========================
 # Config / ENV
 # =========================
@@ -169,8 +169,14 @@ def giveaway_count_entries(gid: int) -> int:
         cur = conn.execute("SELECT COUNT(*) FROM giveaway_entries WHERE giveaway_id=?", (gid,))
         return int(cur.fetchone()[0])
 
+# PATCH: helper to get unique entrant user IDs for a giveaway
+def giveaway_entry_user_ids(gid: int) -> List[int]:
+    with db() as conn:
+        cur = conn.execute("SELECT DISTINCT discord_id FROM giveaway_entries WHERE giveaway_id=?", (gid,))
+        return [int(r[0]) for r in cur.fetchall()]
+
 # =========================
-# Scraping & eligibility
+# Scraping & eligibility (left intact; not used for entry anymore)
 # =========================
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
@@ -394,30 +400,18 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # skip wishlist scraping, just trust entrant input
+        # PATCH: Trust entrant input; no wishlist scraping
         first_ok = ids[0]
         try:
             giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
         except sqlite3.IntegrityError:
             return await interaction.followup.send("You’re already entered ✅", ephemeral=True)
-        
-        await update_giveaway_counter_embed(gid)
-        await interaction.followup.send(f"✅ Entered as **{uname}** (Saved product **{first_ok}**).", ephemeral=True)
-        
-        
-        # --- simplified: skip wishlist scraping, just trust entrant input ---
-        first_ok = ids[0]
-        try:
-            giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
-        except sqlite3.IntegrityError:
-            return await interaction.followup.send("You’re already registered ✅", ephemeral=True)
+
+        # PATCH: ensure participant row exists so cooldown works
+        upsert_entrant(interaction.user.id, uname, total_items=0, eligible=1)
 
         await update_giveaway_counter_embed(gid)
-        await interaction.followup.send(
-            f"✅ Registered as **{uname}** (saved product **{first_ok}**).",
-            ephemeral=True
-        )
-
+        await interaction.followup.send(f"✅ Entered as **{uname}** (saved product **{first_ok}**).", ephemeral=True)
 
 class EnterButton(ui.View):
     def __init__(self, giveaway_id: int, disabled: bool = False, timeout=None):
@@ -497,6 +491,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
 
         end_rel = discord.utils.format_dt(end_at_utc, style='R')
         creators_txt = ", ".join([f"{cid}" for cid,_ in list_creators()]) or "—"
+
         desc = ""
         if announce:
             desc += announce + "\n\n"
@@ -508,66 +503,19 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                  f"• Click **Enter Giveaway** and submit your **IMVU username** + **up to 10 Product IDs/links**\n"
                  f"• Wishlist must be **public** and meet **min items/creator rules**")
 
-        parsed = urllib.parse.urlparse(prize)  # or shop_url if you collect separately
-        qs = urllib.parse.parse_qs(parsed.query)
-        mid = qs.get("manufacturers_id", [None])[0]
-        
-        creator_name = mid
-        if mid:
-            creator_name = await fetch_creator_name(mid)
-
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
         embed.set_footer(text="Only verified Participants are eligible • No wishlist, no win")
         embed.add_field(name="Participants", value="0", inline=True)
-        embed.add_field(name="Today we support", value=shop_url, inline=False)
-
-        
-async def fetch_creator_name(mid: str) -> str:
-    url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={mid}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            html = await resp.text()
-            m = re.search(r'by\s+([A-Za-z0-9_.-]+)<', html)
-            if m:
-                return m.group(1)
-    return mid
 
         await interaction.response.defer(thinking=True)
         msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
         giveaway_set_message(gid, msg.id)
         await interaction.followup.send(f"Giveaway posted ✅ (ID {gid})", ephemeral=True)
 
-@tree.command(name="wish", description="Create a WISH giveaway (admin only).")
-async def wish(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message("Admins only.", ephemeral=True)
-    await interaction.response.send_modal(WishSingle())
-    
 # =========================
 # Draw/close watcher
 # =========================
-async def refresh_and_collect_eligibles() -> List[int]:
-    rows = all_Participants()
-    elig_ids: List[int] = []
-    for discord_id, username, _, _, last_win_at in rows:
-        total, per_creator = await evaluate_user(username)
-        rules = get_rules()
-        min_items = int(rules.get("min_total","10"))
-        allowed = [cid for (cid,_) in list_creators()]
-        eligible = int(total >= min_items and _eligible_by_creator_rule(per_creator, rules, allowed))
-        upsert_entrant(int(discord_id), username, total, eligible)
-        if eligible:
-            if last_win_at:
-                try:
-                    lw = datetime.fromisoformat(last_win_at.replace("Z","")).replace(tzinfo=timezone.utc)
-                except:
-                    lw = datetime.now(timezone.utc) - timedelta(days=9999)
-                if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
-                    await asyncio.sleep(0.05); continue
-            elig_ids.append(int(discord_id))
-        await asyncio.sleep(0.05)
-    return elig_ids
-
+# NOTE: We select winners only among users who actually entered that giveaway, and respect win cooldown.
 @tasks.loop(seconds=30)
 async def giveaway_watcher():
     now = datetime.now(timezone.utc)
@@ -576,10 +524,8 @@ async def giveaway_watcher():
             "SELECT id, channel_id, message_id, winners, prize FROM giveaways "
             "WHERE status='OPEN' AND end_at <= ?", (now.isoformat(),))
         due = cur.fetchall()
-    if not due: return
-
-    elig_ids = await refresh_and_collect_eligibles()
-    random.shuffle(elig_ids)
+    if not due:
+        return
 
     for gid, ch_id, msg_id, winners, prize in due:
         channel = bot.get_channel(int(ch_id))
@@ -590,12 +536,28 @@ async def giveaway_watcher():
         except Exception:
             pass
 
+        # Build eligible pool only from entries for this giveaway + cooldown check
+        entries = giveaway_entry_user_ids(gid)
         picks: List[int] = []
-        pool = list(elig_ids)
-        while pool and len(picks) < max(1, int(winners)):
-            uid = pool.pop()
-            if uid not in picks:
-                picks.append(uid)
+        pool = list(entries)
+        random.shuffle(pool)
+
+        with db() as conn:
+            cool_days = WIN_COOLDOWN_DAYS
+            for uid in pool:
+                cur = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?", (str(uid),))
+                row = cur.fetchone()
+                if not row or not row[0]:
+                    picks.append(uid)
+                else:
+                    try:
+                        lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
+                    except:
+                        lw = datetime.now(timezone.utc) - timedelta(days=9999)
+                    if lw <= datetime.now(timezone.utc) - timedelta(days=cool_days):
+                        picks.append(uid)
+                if len(picks) >= max(1, int(winners)):
+                    break
 
         mention_line = "No eligible Participants 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
         text = f"🎉 **WISH Giveaway Ended**\n**Prize:** {prize}\n**Winner{'s' if len(picks)!=1 else ''}:**\n{mention_line}"
@@ -603,7 +565,8 @@ async def giveaway_watcher():
             await channel.send(text)
         except Exception:
             pass
-        for uid in picks: set_winner(uid)
+        for uid in picks:
+            set_winner(uid)
         giveaway_mark_done(gid)
 
 # =========================
