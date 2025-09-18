@@ -46,7 +46,7 @@ def db():
 def init_db():
     with db() as conn:
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS entrants(
+        CREATE TABLE IF NOT EXISTS Participants(
           discord_id TEXT PRIMARY KEY,
           username   TEXT NOT NULL,
           created_at TEXT NOT NULL,
@@ -124,21 +124,21 @@ def upsert_entrant(discord_id: int, username: str, total_items: int, eligible: i
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
         conn.execute("""
-        INSERT INTO entrants(discord_id, username, created_at, last_checked_at, total_items, eligible)
+        INSERT INTO Participants(discord_id, username, created_at, last_checked_at, total_items, eligible)
         VALUES(?,?,?,?,?,?)
         ON CONFLICT(discord_id) DO UPDATE SET
           username=excluded.username, last_checked_at=excluded.last_checked_at,
           total_items=excluded.total_items, eligible=excluded.eligible
         """, (str(discord_id), username, now, now, total_items, eligible))
 
-def all_entrants():
+def all_Participants():
     with db() as conn:
-        cur = conn.execute("SELECT discord_id, username, total_items, eligible, last_win_at FROM entrants;")
+        cur = conn.execute("SELECT discord_id, username, total_items, eligible, last_win_at FROM Participants;")
         return cur.fetchall()
 
 def set_winner(discord_id: int):
     with db() as conn:
-        conn.execute("UPDATE entrants SET last_win_at=? WHERE discord_id=?",
+        conn.execute("UPDATE Participants SET last_win_at=? WHERE discord_id=?",
                      (datetime.now(timezone.utc).isoformat(), str(discord_id)))
 
 def giveaway_insert(channel_id: int, prize: str, desc: str, winners: int, end_at_iso: str, created_by: int) -> int:
@@ -394,37 +394,25 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # verify wishlist + rules
-        total, per_creator = await evaluate_user(uname)
-        rules = get_rules()
-        min_items = int(rules.get("min_total","10"))
-        allowed = [cid for (cid, _) in list_creators()]
-        meets_min = total >= min_items
-        creator_ok = _eligible_by_creator_rule(per_creator, rules, allowed)
-
-        wl_url, product_ids = await wishlist_url_and_products(uname)
-        has_any = any(pid in product_ids for pid in ids) if product_ids else False
-
-        if not wl_url or not product_ids:
-            return await interaction.followup.send("I couldn't find a **public wishlist** for that username.", ephemeral=True)
-        if not has_any:
-            return await interaction.followup.send("None of those product IDs/links were found on your wishlist sample. Check and try again.", ephemeral=True)
-        if not (meets_min and creator_ok):
-            return await interaction.followup.send(
-                f"Saved your details, but you’re **not eligible** yet.\n"
-                f"- Wishlist items: **{total}** (need ≥ **{min_items}**)\n"
-                f"- Creator rule: **{rules.get('mode','NONE')}**",
-                ephemeral=True
-            )
-
-        first_ok = next((pid for pid in ids if pid in product_ids), ids[0])
+        # skip wishlist scraping, just trust entrant input
+        first_ok = ids[0]
         try:
             giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
         except sqlite3.IntegrityError:
             return await interaction.followup.send("You’re already entered ✅", ephemeral=True)
-
+        
         await update_giveaway_counter_embed(gid)
-        await interaction.followup.send(f"✅ Entered as **{uname}** (Product **{first_ok}** verified).", ephemeral=True)
+        await interaction.followup.send(f"✅ Entered as **{uname}** (Saved product **{first_ok}**).", ephemeral=True)
+        
+        
+                first_ok = next((pid for pid in ids if pid in product_ids), ids[0])
+                try:
+                    giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
+                except sqlite3.IntegrityError:
+                    return await interaction.followup.send("You’re already entered ✅", ephemeral=True)
+        
+                await update_giveaway_counter_embed(gid)
+                await interaction.followup.send(f"✅ Entered as **{uname}** (Product **{first_ok}** verified).", ephemeral=True)
 
 class EnterButton(ui.View):
     def __init__(self, giveaway_id: int, disabled: bool = False, timeout=None):
@@ -456,12 +444,12 @@ async def update_giveaway_counter_embed(giveaway_id: int):
         new.set_footer(text=e.footer.text)
     has_field = False
     for f in e.fields:
-        if f.name == "Entrants":
-            new.add_field(name="Entrants", value=str(count), inline=True); has_field = True
+        if f.name == "Participants":
+            new.add_field(name="Participants", value=str(count), inline=True); has_field = True
         else:
             new.add_field(name=f.name, value=f.value, inline=f.inline)
     if not has_field:
-        new.add_field(name="Entrants", value="0", inline=True)
+        new.add_field(name="Participants", value="0", inline=True)
     if e.thumbnail and e.thumbnail.url:
         new.set_thumbnail(url=e.thumbnail.url)
     await msg.edit(embed=new, view=EnterButton(giveaway_id))
@@ -516,8 +504,8 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                  f"• Wishlist must be **public** and meet **min items/creator rules**")
 
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
-        embed.set_footer(text="Only verified entrants are eligible • No wishlist, no win")
-        embed.add_field(name="Entrants", value="0", inline=True)
+        embed.set_footer(text="Only verified Participants are eligible • No wishlist, no win")
+        embed.add_field(name="Participants", value="0", inline=True)
 
         await interaction.response.defer(thinking=True)
         msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
@@ -534,7 +522,7 @@ async def wish(interaction: discord.Interaction):
 # Draw/close watcher
 # =========================
 async def refresh_and_collect_eligibles() -> List[int]:
-    rows = all_entrants()
+    rows = all_Participants()
     elig_ids: List[int] = []
     for discord_id, username, _, _, last_win_at in rows:
         total, per_creator = await evaluate_user(username)
@@ -584,7 +572,7 @@ async def giveaway_watcher():
             if uid not in picks:
                 picks.append(uid)
 
-        mention_line = "No eligible entrants 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
+        mention_line = "No eligible Participants 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
         text = f"🎉 **WISH Giveaway Ended**\n**Prize:** {prize}\n**Winner{'s' if len(picks)!=1 else ''}:**\n{mention_line}"
         try:
             await channel.send(text)
