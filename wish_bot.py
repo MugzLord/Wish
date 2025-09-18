@@ -614,20 +614,25 @@ async def sync_cmd(interaction: discord.Interaction):
 async def on_ready():
     init_db()
     try:
-        # hard-prune any old commands then register only these
-        bot.tree.clear_commands(guild=None); await bot.tree.sync(guild=None)
+        # Register commands globally…
+        await tree.sync(guild=None)
+        # …and per guild for instant visibility
         for g in bot.guilds:
-            bot.tree.clear_commands(guild=g); await bot.tree.sync(guild=g)
-        await bot.tree.sync()
-        for g in bot.guilds:
-            await bot.tree.sync(guild=g)
-        print("Slash commands pruned & re-synced.")
+            await tree.sync(guild=g)
+        print("Slash commands synced.")
     except Exception as e:
         print("Slash sync failed:", e)
 
     if not giveaway_watcher.is_running():
         giveaway_watcher.start()
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
+    
+@tree.command(name="wish", description="Create a WISH giveaway (admin only).")
+async def wish(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+    await interaction.response.send_modal(WishSingle())  # <-- your single admin modal class
 
 # ---- caching helpers used above ----
 def cache_put(product_id: str, creator_id: Optional[str]):  # redefined above already; kept to avoid NameError
