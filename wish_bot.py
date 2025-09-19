@@ -268,33 +268,6 @@ def _extract_wishlist_links_from_profile(html: str) -> List[str]:
         if u not in seen: seen.add(u); res.append(u)
     return res
 
-async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_SAMPLE_LIMIT) -> Tuple[Optional[str], List[str]]:
-    uname = username.strip()
-    if not uname:
-        return (None, [])
-    timeout = aiohttp.ClientTimeout(total=12, connect=10)
-    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
-        # via profile
-        for tmpl in PROFILE_CANDIDATES:
-            purl = tmpl.format(username=uname)
-            html = await _fetch_html(purl, s)
-            if not html: continue
-            for wl in _extract_wishlist_links_from_profile(html):
-                whtml = await _fetch_html(wl, s)
-                if not whtml: continue
-                pids = _product_ids_from_html(whtml)
-                if pids:
-                    return (wl, pids[:sample_limit])
-        # direct guesses
-        for tmpl in WISHLIST_CANDIDATES:
-            wurl = tmpl.format(username=uname)
-            whtml = await _fetch_html(wurl, s)
-            if not whtml: continue
-            pids = _product_ids_from_html(whtml)
-            if pids:
-                return (wurl, pids[:sample_limit])
-    return (None, [])
-
 async def product_creator_id(session: aiohttp.ClientSession, product_id: str, sem: asyncio.Semaphore) -> Optional[str]:
     cached = cache_get(product_id)
     if cached is not None:
@@ -403,23 +376,12 @@ async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
         if not uname:
             continue
         url = imvu_profile_link(uname)                 # ← open profile
-        label = f"Gift for {(uname or 'winner').strip()}"[:80]  # keep original casing
+        label = f"Gift {(uname or 'winner').strip()}"[:80]  # keep original casing
         v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         added += 1
         if added >= 25:
             break
     return v if added else None
-
-    
-def imvu_wishlist_link(username: str) -> str:
-    """Return a wishlist URL that actually works on IMVU."""
-    u = (username or "").strip()
-    q = urllib.parse.quote(u, safe="")
-    # If it looks like a display name (has a space), prefer display_name=
-    if " " in u:
-        return f"https://www.imvu.com/catalog/web_wishlist.php?display_name={q}"
-    # Otherwise use the account name param
-    return f"https://www.imvu.com/catalog/web_wishlist.php?user={q}"
 
 # =========================
 # Input sanitizers
@@ -742,11 +704,28 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
         f"**Prize:** {format_prize_text(prize)}\n"
         f"**New winner{'s' if len(picks)!=1 else ''}:**\n{lines}"
     )
-    view = build_gift_view(gid, picks)
+    # Build one profile button per winner (opens https://www.imvu.com/next/av/<Username>/)
+    view = ui.View(timeout=None)
+    with db() as conn:
+        for uid in picks:
+            row = conn.execute(
+                "SELECT imvu_username FROM giveaway_entries "
+                "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+                (giveaway_id, str(uid))
+            ).fetchone()
+            if not row or not row[0]:
+                continue
+            uname = (row[0] or "").strip()
+            url = imvu_profile_link(uname)
+            label = f"Gift {uname}"[:80]
+            view.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
+    
+    view_to_send = view if len(view.children) > 0 else None
     try:
-        await channel.send(text, view=view)
+        await channel.send(text, view=view_to_send)
     except Exception:
         pass
+
 
 
     for uid in picks:
@@ -938,7 +917,7 @@ def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional
 def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
     """
     Creates one Link Button per winner that opens their **wishlist**.
-    (Label still says 'Gift for …' but now goes to WL.)
+    (Label still says 'Gift …' but now goes to WL.)
     """
     v = ui.View(timeout=None)
     added = 0
@@ -947,7 +926,7 @@ def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
         if not uname:
             continue
         url = imvu_wishlist_link(uname)                       # <-- wishlist link
-        label = f"Gift for {(uname or 'winner').strip().title()}"[:80]
+        label = f"Gift {(uname or 'winner').strip().title()}"[:80]
         v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         added += 1
         if added >= 25:  # Discord component cap
