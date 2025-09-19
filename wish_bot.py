@@ -575,9 +575,9 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         desc += (f"**Prize:** {prize}\n"
                  f"**Winners:** {winners}\n"
                  f"**Ends:** {end_rel}\n\n"
-                 f"**Today we support:** {creators_txt}\n\n"
+                 f"**Today we support Shop:** {creators_txt}\n\n"
                  f"**How to join**\n"
-                 f" Hit that **Enter Giveaway** button, drop your **IMVU username**, and follow steps **\n"
+                 f" Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps \n"
                  f" or you're just window shopping. ")
 
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
