@@ -2,13 +2,13 @@
 # Env: DISCORD_TOKEN (required), GIVEAWAY_CHANNEL_ID (optional), TIMEZONE, DRAW_HOUR_LOCAL, WIN_COOLDOWN_DAYS
 # Run: python wish_bot.py
 
-import os, re, json, sqlite3, asyncio, random, urllib.parse
+import os, re, json, sqlite3, asyncio, random, urllib.parse, html
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, List, Dict
 
 import aiohttp
 import discord
-from discord import ui
+from discord import ui, app_commands
 from discord.ext import commands, tasks
 
 # =========================
@@ -95,7 +95,6 @@ def init_db():
           created_at  TEXT NOT NULL,
           PRIMARY KEY (giveaway_id, discord_id)
         );""")
-
         conn.execute("""
         CREATE TABLE IF NOT EXISTS giveaway_entries(
           giveaway_id INTEGER NOT NULL,
@@ -169,6 +168,15 @@ def giveaway_set_message(gid: int, message_id: int):
 def giveaway_mark_done(gid: int):
     with db() as conn:
         conn.execute("UPDATE giveaways SET status='DONE' WHERE id=?", (gid,))
+
+# PATCH: atomically claim a giveaway so only one loop processes it
+def giveaway_claim(gid: int) -> bool:
+    with db() as conn:
+        cur = conn.execute(
+            "UPDATE giveaways SET status='DRAWING' WHERE id=? AND status='OPEN'",
+            (gid,)
+        )
+        return cur.rowcount > 0
 
 def giveaway_add_entry(gid: int, discord_id: int, uname: str, pid: str):
     with db() as conn:
@@ -300,26 +308,6 @@ async def product_creator_id(session: aiohttp.ClientSession, product_id: str, se
                 return cid
     cache_put(product_id, None)
     return None
-    
-# PATCH: fetch creator display name from IMVU search page
-CREATOR_NAME_RX = re.compile(r'by\s+([A-Za-z0-9_.-]{2,40})<', re.I)
-
-async def fetch_creator_name(mid: str) -> Optional[str]:
-    url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={mid}"
-    timeout = aiohttp.ClientTimeout(total=10, connect=8)
-    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
-        html = await _fetch_html(url, s, min_len=500)
-        if not html:
-            return None
-        m = CREATOR_NAME_RX.search(html)
-        if m:
-            return m.group(1)
-        # fallback: sometimes in <title> ... by NAME ...
-        m = re.search(r'<title>[^<]*by\s+([A-Za-z0-9_.-]{2,40})', html, re.I)
-        if m:
-            return m.group(1)
-    return None
-
 
 def cache_get(product_id: str) -> Optional[str]:
     with db() as conn:
@@ -411,6 +399,37 @@ def parse_product_ids(raw: str, limit: int = 10) -> List[str]:
     return out
 
 # =========================
+# Creator helper (robust name resolver)
+# =========================
+CREATOR_NAME_RX_1 = re.compile(r'by\s*<a[^>]*>\s*([A-Za-z0-9_.\- ]{2,40})\s*</a>', re.I)
+CREATOR_NAME_RX_2 = re.compile(r'(?:manufacturer|manufacturers?_name)\s*[:=]\s*["\']([^"\']{2,40})["\']', re.I)
+CREATOR_NAME_RX_3 = re.compile(r'<title>[^<]*\bby\s+([A-Za-z0-9_.\- ]{2,40})\b', re.I)
+
+async def fetch_creator_name(mid: str) -> Optional[str]:
+    search_url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={mid}"
+    timeout = aiohttp.ClientTimeout(total=12, connect=8)
+    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
+        html_text = await _fetch_html(search_url, s, min_len=400)
+        if html_text:
+            m = CREATOR_NAME_RX_1.search(html_text) or CREATOR_NAME_RX_2.search(html_text) or CREATOR_NAME_RX_3.search(html_text)
+            if m:
+                return html.unescape(m.group(1)).strip()
+            # fallback: open first product from that manufacturer
+            pids = _product_ids_from_html(html_text)
+            for pid in pids[:3]:
+                for purl in (
+                    f"https://www.imvu.com/shop/product/{pid}",
+                    f"https://www.imvu.com/shop/product.php?products_id={pid}",
+                ):
+                    phtml = await _fetch_html(purl, s, min_len=400)
+                    if not phtml:
+                        continue
+                    m2 = CREATOR_NAME_RX_1.search(phtml) or CREATOR_NAME_RX_2.search(phtml) or CREATOR_NAME_RX_3.search(phtml)
+                    if m2:
+                        return html.unescape(m2.group(1)).strip()
+    return None
+
+# =========================
 # Entrant UI — button + modal
 # =========================
 class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
@@ -419,7 +438,7 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
         self.gid = giveaway_id
 
     imvu_username = ui.TextInput(label="IMVU username",
-                                 placeholder="e.g., mikeymoon (not a link)",
+                                 placeholder="e.g., YaEli (not a link)",
                                  required=True, max_length=40)
     product_ids   = ui.TextInput(label="Product IDs/Links (max 10)",
                                  style=discord.TextStyle.paragraph,
@@ -445,14 +464,14 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        # PATCH: Trust entrant input; no wishlist scraping
+        # Trust entrant input; no wishlist scraping
         first_ok = ids[0]
         try:
             giveaway_add_entry(gid, interaction.user.id, uname, first_ok)
         except sqlite3.IntegrityError:
             return await interaction.followup.send("You’re already entered ✅", ephemeral=True)
 
-        # PATCH: ensure participant row exists so cooldown works
+        # ensure participant row exists so cooldown works
         upsert_entrant(interaction.user.id, uname, total_items=0, eligible=1)
 
         await update_giveaway_counter_embed(gid)
@@ -493,7 +512,7 @@ async def update_giveaway_counter_embed(giveaway_id: int):
         else:
             new.add_field(name=f.name, value=f.value, inline=f.inline)
     if not has_field:
-        new.add_field(name="Participants", value="0", inline=True)
+        new.add_field(name="Participants", value=str(count), inline=True)  # PATCH: show real count on first update
     if e.thumbnail and e.thumbnail.url:
         new.set_thumbnail(url=e.thumbnail.url)
     await msg.edit(embed=new, view=EnterButton(giveaway_id))
@@ -527,15 +546,28 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
 
         prize = str(self.prize).strip()
         announce = str(self.announce or "").strip()
+
+        # PATCH: resolve manufacturer IDs in "shops" to human-readable names
         ids = re.findall(r'(\d{5,})', str(self.shops or ""))
-        for cid in dict.fromkeys(ids):
-            add_creator(cid, None)
+        unique_ids = list(dict.fromkeys(ids))
+        creator_names: List[str] = []
+        for cid in unique_ids:
+            add_creator(cid, None)  # ensure row exists
+            try:
+                name = await fetch_creator_name(cid)
+            except Exception:
+                name = None
+            if name:
+                add_creator(cid, name)           # store label for future
+                creator_names.append(name)
+            else:
+                creator_names.append(cid)        # graceful fallback
 
         end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
         gid = giveaway_insert(interaction.channel.id, prize, announce, winners, end_at_utc.isoformat(), interaction.user.id)
 
         end_rel = discord.utils.format_dt(end_at_utc, style='R')
-        creators_txt = ", ".join([f"{cid}" for cid,_ in list_creators()]) or "—"
+        creators_txt = ", ".join(creator_names) if creator_names else "—"
 
         desc = ""
         if announce:
@@ -545,8 +577,8 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                  f"**Ends:** {end_rel}\n\n"
                  f"**Today we support:** {creators_txt}\n\n"
                  f"**How to join**\n"
-                 f"• Click **Enter Giveaway** and submit your **IMVU username** + **follow instructions **\n"
-                 f"• Only valid **participants** will be added in the **draw**")
+                 f" Hit that **Enter Giveaway** button, drop your **IMVU username**, and follow steps **\n"
+                 f" or you're just window shopping. ")
 
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
         embed.set_footer(text="Your name’s in, but without a WL it’s out. No WL, no win.")
@@ -556,16 +588,16 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
         giveaway_set_message(gid, msg.id)
         await interaction.followup.send(f"Giveaway posted ✅ (ID {gid})", ephemeral=True)
-        
+
 @tree.command(name="wish", description="Create a WISH giveaway (admin only).")
 async def wish_cmd(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("Admins only.", ephemeral=True)
     await interaction.response.send_modal(WishSingle())
 
-#reroll command
-from discord import app_commands  # if not already imported at top
-
+# =========================
+# Reroll
+# =========================
 @tree.command(name="reroll", description="Admin: reroll winner(s) for a past giveaway.")
 @app_commands.describe(giveaway_id="Giveaway ID (see bot message or DB)", count="How many new winners (default 1)")
 async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: int = 1):
@@ -605,30 +637,10 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
         add_giveaway_winner(giveaway_id, uid)
 
     await interaction.response.send_message(f"Rerolled ✅ Picked {len(picks)} new winner(s).", ephemeral=True)
-#creator helper
-# PATCH: fetch creator display name from IMVU search page
-CREATOR_NAME_RX = re.compile(r'by\s+([A-Za-z0-9_.-]{2,40})<', re.I)
-
-async def fetch_creator_name(mid: str) -> Optional[str]:
-    url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={mid}"
-    timeout = aiohttp.ClientTimeout(total=10, connect=8)
-    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
-        html = await _fetch_html(url, s, min_len=500)
-        if not html:
-            return None
-        m = CREATOR_NAME_RX.search(html)
-        if m:
-            return m.group(1)
-        # fallback: sometimes in <title> ... by NAME ...
-        m = re.search(r'<title>[^<]*by\s+([A-Za-z0-9_.-]{2,40})', html, re.I)
-        if m:
-            return m.group(1)
-    return None
 
 # =========================
 # Draw/close watcher
 # =========================
-# NOTE: We select winners only among users who actually entered that giveaway, and respect win cooldown.
 @tasks.loop(seconds=30)
 async def giveaway_watcher():
     now = datetime.now(timezone.utc)
@@ -641,6 +653,10 @@ async def giveaway_watcher():
         return
 
     for gid, ch_id, msg_id, winners, prize in due:
+        # PATCH: claim so only one loop/worker processes it
+        if not giveaway_claim(gid):
+            continue
+
         channel = bot.get_channel(int(ch_id))
 
         # disable button
@@ -675,16 +691,16 @@ async def giveaway_watcher():
                     if len(picks) >= winners_n:
                         break
 
-        # PATCH: fallback — if cooldown excluded everyone, still pick from entries
+        # Fallback — if cooldown excluded everyone, still pick from entries
         if len(picks) < winners_n and pool:
             remaining = [u for u in pool if u not in picks]
             while remaining and len(picks) < winners_n:
                 picks.append(remaining.pop())
 
         mention_line = "No entries 😔" if not pool else (
-            "No eligible Participants 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
+            "We checked twice… still nada. 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
         )
-        text = f"🎉 **WISH Giveaway Ended**\n**Prize:** {prize}\n**Winner{'s' if winners_n!=1 else ''}:**\n{mention_line}"
+        text = f" **WISH Giveaway Ended**\n**Prize:** {prize}\n**Winner{'s' if winners_n!=1 else ''}:**\n{mention_line}"
 
         try:
             await channel.send(text)
@@ -697,13 +713,12 @@ async def giveaway_watcher():
         
         giveaway_mark_done(gid)
 
-
-# PATCH: extract product image (og:image) from IMVU product pages
+# =========================
+# Optional: Product image helper (not wired to embed by default)
+# =========================
 PRODUCT_OG_IMAGE_RX = re.compile(
-    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-    re.I
+    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.I
 )
-
 async def product_image_url_by_pid(pid: str) -> Optional[str]:
     timeout = aiohttp.ClientTimeout(total=12, connect=10)
     async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
@@ -711,10 +726,10 @@ async def product_image_url_by_pid(pid: str) -> Optional[str]:
             f"https://www.imvu.com/shop/product/{pid}",
             f"https://www.imvu.com/shop/product.php?products_id={pid}",
         ):
-            html = await _fetch_html(url, s, min_len=500)
-            if not html:
+            html_page = await _fetch_html(url, s, min_len=500)
+            if not html_page:
                 continue
-            m = PRODUCT_OG_IMAGE_RX.search(html)
+            m = PRODUCT_OG_IMAGE_RX.search(html_page)
             if m:
                 return m.group(1)
     return None
