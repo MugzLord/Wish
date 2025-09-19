@@ -400,17 +400,14 @@ def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional
     return (uname, pid)
 
 async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
-    """
-    One Link Button per winner that opens their IMVU *profile* page.
-    """
     v = ui.View(timeout=None)
     added = 0
     for uid in user_ids:
         uname, _pid = giveaway_entry_username_and_pid(gid, uid)
         if not uname:
             continue
-        url = imvu_profile_link(uname)
-        label = f"Gift for {(uname or 'winner').strip().title()}"[:80]
+        url = imvu_profile_link(uname)                 # ← open profile
+        label = f"Gift for {(uname or 'winner').strip()}"[:80]  # keep original casing
         v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         added += 1
         if added >= 25:
