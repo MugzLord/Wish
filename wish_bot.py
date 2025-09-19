@@ -399,6 +399,24 @@ def parse_product_ids(raw: str, limit: int = 10) -> List[str]:
         if len(out) >= limit: break
     return out
 
+# Turn product IDs/URLs in the prize string into clickable links
+URL_RX = re.compile(r'(https?://\S+)', re.I)
+
+def format_prize_text(prize: str) -> str:
+    prize = str(prize or "").strip()
+    if not prize:
+        return prize
+    # collect product IDs
+    pids = parse_product_ids(prize, limit=5)
+    links: List[str] = []
+    for pid in pids:
+        links.append(f"<https://www.imvu.com/shop/product/{pid}>")
+    # include any raw http(s) links already in the text
+    for m in URL_RX.findall(prize):
+        if m not in links:
+            links.append(m if m.startswith("<") else f"<{m}>")
+    return ", ".join(links) if links else prize
+
 # =========================
 # Creator helper (robust name resolver)
 # =========================
@@ -429,6 +447,10 @@ async def fetch_creator_name(mid: str) -> Optional[str]:
                     if m2:
                         return html.unescape(m2.group(1)).strip()
     return None
+
+def shop_masked_link(cid: str, label: Optional[str]) -> str:
+    url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={cid}"
+    return f"[{label or cid}]({url})"
 
 # =========================
 # Entrant UI — button + modal
@@ -554,10 +576,11 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         # ✅ ACK immediately so Discord doesn't time out
         await interaction.response.defer()  # acknowledge with no visible message
 
-        # Resolve manufacturer IDs in "shops" to display names (time-boxed)
+        # Resolve manufacturer IDs in "shops" to display names (time-boxed) + clickable links
         ids = re.findall(r'(\d{5,})', str(self.shops or ""))
         unique_ids = list(dict.fromkeys(ids))
         creator_names: List[str] = []
+        creator_clicks: List[str] = []
         for cid in unique_ids:
             add_creator(cid, None)  # ensure row exists
             name = None
@@ -567,9 +590,8 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                 name = None
             if name:
                 add_creator(cid, name)
-                creator_names.append(name)
-            else:
-                creator_names.append(cid)  # fallback to CID
+            creator_names.append(name or cid)
+            creator_clicks.append(shop_masked_link(cid, name or cid))
 
         # PATCH: winners = number of unique shops when provided; else use what was typed
         winners_n = len(unique_ids) if unique_ids else winners_typed
@@ -580,13 +602,13 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         )
 
         end_rel = discord.utils.format_dt(end_at_utc, style='R')
-        creators_txt = ", ".join(creator_names) if creator_names else "—"
+        creators_txt = ", ".join(creator_clicks) if creator_clicks else "—"  # clickable
 
         desc = ""
         if announce:
             desc += announce + "\n\n"
         desc += (
-            f"**Prize:** {prize}\n"
+            f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
             f"**Today we support Shops:** {creators_txt}\n\n"
@@ -601,7 +623,6 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         try:
             msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
             giveaway_set_message(gid, msg.id)
-            
         except Exception as e:
             await interaction.followup.send(f"Couldn’t post the giveaway: {e}", ephemeral=True)
 
@@ -658,6 +679,46 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
     random.shuffle(pool)
     picks = pool[:max(1, int(count))]
 
+    # Announce & store — include each winner's product link
+    rows = []
+    for u in picks:
+        pid = giveaway_entry_product_id(giveaway_id, u)
+        if pid:
+            rows.append(f"• <@{u}> — <https://www.imvu.com/shop/product/{pid}>")
+        else:
+            rows.append(f"• <@{u}>")
+    lines = "\n".join(rows)
+
+    text = (
+        f"🔁 **REROLL** for Giveaway #{giveaway_id}\n"
+        f"**Prize:** {format_prize_text(prize)}\n"
+        f"**New winner{'s' if len(picks)!=1 else ''}:**\n{lines}"
+    )
+    try:
+        await channel.send(text)
+    except Exception:
+        pass
+
+    for uid in picks:
+        set_winner(uid)
+        add_giveaway_winner(giveaway_id, uid)
+
+    await interaction.response.send_message(f"Rerolled ✅ Picked {len(picks)} new winner(s).", ephemeral=True)
+
+# Return the first product ID a user submitted for this giveaway (if any)
+def giveaway_entry_product_id(gid: int, discord_id: int) -> Optional[str]:
+    with db() as conn:
+        cur = conn.execute(
+            "SELECT wishlist_product_id FROM giveaway_entries "
+            "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+            (gid, str(discord_id))
+        )
+        row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    ids = parse_product_ids(str(row[0]), limit=1)
+    return ids[0] if ids else None
+
 # =========================
 # Draw/close watcher
 # =========================
@@ -694,33 +755,58 @@ async def giveaway_watcher():
         pool = list(entries)
         random.shuffle(pool)
 
-        # Try to respect cooldown
-        if pool and WIN_COOLDOWN_DAYS > 0:
-            with db() as conn:
+        with db() as conn:
+            if ONE_WIN_ONLY:
+                # Lifetime: exclude anyone who has ever won
                 for uid in pool:
                     row = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?", (str(uid),)).fetchone()
                     if not row or not row[0]:
                         picks.append(uid)
-                    else:
-                        try:
-                            lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
-                        except:
-                            lw = datetime.now(timezone.utc) - timedelta(days=9999)
-                        if lw <= datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
-                            picks.append(uid)
                     if len(picks) >= winners_n:
                         break
+            else:
+                # Try to respect cooldown
+                if pool and WIN_COOLDOWN_DAYS > 0:
+                    for uid in pool:
+                        row = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?", (str(uid),)).fetchone()
+                        if not row or not row[0]:
+                            picks.append(uid)
+                        else:
+                            try:
+                                lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
+                            except:
+                                lw = datetime.now(timezone.utc) - timedelta(days=9999)
+                            if lw <= datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
+                                picks.append(uid)
+                        if len(picks) >= winners_n:
+                            break
 
-        # Fallback — if cooldown excluded everyone, still pick from entries
-        if len(picks) < winners_n and pool:
+        # Fallback — if cooldown excluded everyone (and lifetime lock is OFF), still pick from entries
+        if not ONE_WIN_ONLY and len(picks) < winners_n and pool:
             remaining = [u for u in pool if u not in picks]
             while remaining and len(picks) < winners_n:
                 picks.append(remaining.pop())
 
-        mention_line = "No entries 😔" if not pool else (
-            "We checked twice… still nada. 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
+        # Build the winners list with each user's product link
+        if not pool:
+            mention_line = "No entries 😔"
+        elif not picks:
+            mention_line = "No eligible Participants 😔"
+        else:
+            rows = []
+            for uid in picks:
+                pid = giveaway_entry_product_id(gid, uid)
+                if pid:
+                    rows.append(f"• <@{uid}> — <https://www.imvu.com/shop/product/{pid}>")
+                else:
+                    rows.append(f"• <@{uid}>")
+            mention_line = "\n".join(rows)
+
+        text = (
+            f"🎉 **WISH Giveaway Ended**\n"
+            f"**Prize:** {format_prize_text(prize)}\n"
+            f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
         )
-        text = f" **WISH Giveaway Ended**\n**Prize:** {prize}\n**Winner{'s' if winners_n!=1 else ''}:**\n{mention_line}"
 
         try:
             await channel.send(text)
