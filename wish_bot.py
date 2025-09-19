@@ -552,7 +552,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         announce = str(self.announce or "").strip()
 
         # ✅ ACK immediately so Discord doesn't time out
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer()  # acknowledge with no visible message
 
         # Resolve manufacturer IDs in "shops" to display names (time-boxed)
         ids = re.findall(r'(\d{5,})', str(self.shops or ""))
@@ -601,7 +601,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         try:
             msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
             giveaway_set_message(gid, msg.id)
-            await interaction.followup.send(f"Giveaway posted ✅ (ID {gid})", ephemeral=True)
+            
         except Exception as e:
             await interaction.followup.send(f"Couldn’t post the giveaway: {e}", ephemeral=True)
 
