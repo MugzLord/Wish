@@ -10,6 +10,7 @@ import aiohttp
 import discord
 from discord import ui, app_commands
 from discord.ext import commands, tasks
+
 # =========================
 # Config / ENV 
 # =========================
@@ -25,6 +26,47 @@ PRODUCT_CONCURRENCY = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
 ONE_WIN_ONLY = os.getenv("ONE_WIN_ONLY", "1") == "1"  # 1 = lifetime one win; set to 0 to disable
 
+# ---- Optional auto-starter ENV (safe defaults; not used unless you start auto_starter) ----
+def _env_int(name: str, default: int = 0) -> int:
+    try:
+        v = os.getenv(name, str(default))
+        return int(v) if str(v).strip() else int(default)
+    except Exception:
+        return int(default)
+
+DAILY_CH_ID      = _env_int("DAILY_GIVEAWAY_CHANNEL_ID", 0)
+DAILY_AT_LOCAL   = os.getenv("DAILY_GIVEAWAY_TIME_LOCAL", "18:00")
+DAILY_DURATION   = os.getenv("DAILY_GIVEAWAY_DURATION", "24h")
+DAILY_PRIZE      = os.getenv("DAILY_GIVEAWAY_PRIZE", "")
+DAILY_WINNERS    = _env_int("DAILY_GIVEAWAY_WINNERS", 0)
+DAILY_SHOPS      = os.getenv("DAILY_GIVEAWAY_SHOPS", "")
+DAILY_ANNOUNCE   = os.getenv("DAILY_GIVEAWAY_ANNOUNCE", "")
+
+WEEKLY_CH_ID     = _env_int("WEEKLY_GIVEAWAY_CHANNEL_ID", 0)
+WEEKLY_WEEKDAY   = os.getenv("WEEKLY_GIVEAWAY_WEEKDAY", "sun")
+WEEKLY_AT_LOCAL  = os.getenv("WEEKLY_GIVEAWAY_TIME_LOCAL", "18:00")
+WEEKLY_DURATION  = os.getenv("WEEKLY_GIVEAWAY_DURATION", "24h")
+WEEKLY_PRIZE     = os.getenv("WEEKLY_GIVEAWAY_PRIZE", "")
+WEEKLY_WINNERS   = _env_int("WEEKLY_GIVEAWAY_WINNERS", 1)
+WEEKLY_SHOPS     = os.getenv("WEEKLY_GIVEAWAY_SHOPS", "")
+WEEKLY_ANNOUNCE  = os.getenv("WEEKLY_GIVEAWAY_ANNOUNCE", "")
+
+def _parse_hm(s: str) -> Tuple[int,int]:
+    try:
+        h, m = str(s).split(":")
+        return int(h), int(m)
+    except Exception:
+        return (18, 0)
+
+def _now_local() -> datetime:
+    return datetime.now(LOCAL_TZ)
+
+def _today_rule_key(key: str) -> str:
+    return f"{key}:{_now_local().date().isoformat()}"
+
+def _week_rule_key(key: str) -> str:
+    y, w, _ = _now_local().isocalendar()
+    return f"{key}:{y}-W{w:02d}"
 
 try:
     from zoneinfo import ZoneInfo
@@ -215,6 +257,14 @@ def imvu_profile_link(username: str) -> str:
     u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", u)  # account names only
     return f"https://www.imvu.com/next/av/{u_safe}/"
 
+def imvu_wishlist_link(username: str) -> str:
+    """Fallback WL link (kept for completeness). Tries display_name when spaces exist."""
+    u = (username or "").strip()
+    q = urllib.parse.quote(u, safe="")
+    if " " in u:
+        return f"https://www.imvu.com/catalog/web_wishlist.php?display_name={q}"
+    return f"https://www.imvu.com/catalog/web_wishlist.php?user={q}"
+
 # =========================
 # Scraping & eligibility (left intact; not used for entry anymore)
 # =========================
@@ -269,6 +319,37 @@ def _extract_wishlist_links_from_profile(html: str) -> List[str]:
         if u not in seen: seen.add(u); res.append(u)
     return res
 
+async def wishlist_url_and_products(username: str, sample_limit: int = PRODUCT_SAMPLE_LIMIT) -> Tuple[Optional[str], List[str]]:
+    """Minimal, keeps prior behavior: try profile, then direct URLs, return WL url + product IDs found."""
+    uname = username.strip()
+    if not uname:
+        return (None, [])
+    timeout = aiohttp.ClientTimeout(total=12, connect=10)
+    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
+        # via profile
+        for tmpl in PROFILE_CANDIDATES:
+            purl = tmpl.format(username=uname)
+            html_txt = await _fetch_html(purl, s)
+            if not html_txt: 
+                continue
+            for wl in _extract_wishlist_links_from_profile(html_txt):
+                whtml = await _fetch_html(wl, s)
+                if not whtml: 
+                    continue
+                pids = _product_ids_from_html(whtml)
+                if pids:
+                    return (wl, pids[:sample_limit])
+        # direct guesses
+        for tmpl in WISHLIST_CANDIDATES:
+            wurl = tmpl.format(username=uname)
+            whtml = await _fetch_html(wurl, s)
+            if not whtml: 
+                continue
+            pids = _product_ids_from_html(whtml)
+            if pids:
+                return (wurl, pids[:sample_limit])
+    return (None, [])
+
 async def product_creator_id(session: aiohttp.ClientSession, product_id: str, sem: asyncio.Semaphore) -> Optional[str]:
     cached = cache_get(product_id)
     if cached is not None:
@@ -279,9 +360,9 @@ async def product_creator_id(session: aiohttp.ClientSession, product_id: str, se
     ]
     async with sem:
         for url in urls:
-            html = await _fetch_html(url, session)
-            if not html: continue
-            m = MANUFACTURER_RX.search(html)
+            html_txt = await _fetch_html(url, session)
+            if not html_txt: continue
+            m = MANUFACTURER_RX.search(html_txt)
             if m:
                 cid = m.group(1)
                 cache_put(product_id, cid)
@@ -352,6 +433,7 @@ def _eligible_by_creator_rule(per_creator: Dict[str,int], rules: Dict[str,str], 
         return True
 
     return True
+
 # Return (imvu_username, first_product_id) a user submitted in this giveaway
 def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional[str], Optional[str]]:
     with db() as conn:
@@ -369,6 +451,7 @@ def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional
         pid = ids[0] if ids else None
     return (uname, pid)
 
+# (Unused now; harmless if left here.)
 async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
     v = ui.View(timeout=None)
     added = 0
@@ -376,8 +459,8 @@ async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
         uname, _pid = giveaway_entry_username_and_pid(gid, uid)
         if not uname:
             continue
-        url = imvu_profile_link(uname)                 # ← open profile
-        label = f"Gift {(uname or 'winner').strip()}"[:80]  # keep original casing
+        url = imvu_profile_link(uname)
+        label = f"Gift {(uname or 'winner').strip()}"[:80]
         v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         added += 1
         if added >= 25:
@@ -594,7 +677,7 @@ async def update_giveaway_counter_embed(giveaway_id: int):
         else:
             new.add_field(name=f.name, value=f.value, inline=f.inline)
     if not has_field:
-        new.add_field(name="Participants", value=str(count), inline=True)  # PATCH: show real count on first update
+        new.add_field(name="Participants", value=str(count), inline=True)  # show real count on first update
     if e.thumbnail and e.thumbnail.url:
         new.set_thumbnail(url=e.thumbnail.url)
     await msg.edit(embed=new, view=EnterButton(giveaway_id))
@@ -617,18 +700,17 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
     shops    = ui.TextInput(label="Shops (IDs or shop URLs, comma/lines)",
                             style=discord.TextStyle.paragraph, required=False)
 
-    ##
     async def on_submit(self, interaction: discord.Interaction):
         # Fast validate first (no awaits here)
         try:
             secs = parse_duration_to_seconds(str(self.duration))
-            winners_typed = max(1, int(str(self.winners)))   # PATCH: keep what user typed
+            winners_typed = max(1, int(str(self.winners)))
         except Exception as e:
             await interaction.response.send_message(f"Invalid: {e}", ephemeral=True)
             return
 
         prize = str(self.prize).strip()
-        # announce = str(self.announce or "").strip()
+        announce = ""  # announcement field removed
 
         # ✅ ACK immediately so Discord doesn't time out
         await interaction.response.defer()  # acknowledge with no visible message
@@ -650,7 +732,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             creator_names.append(name or cid)
             creator_clicks.append(shop_masked_link(cid, name or cid))
 
-        # PATCH: winners = number of unique shops when provided; else use what was typed
+        # winners = number of unique shops when provided; else use what was typed
         winners_n = len(unique_ids) if unique_ids else winners_typed
 
         end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
@@ -661,15 +743,12 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         end_rel = discord.utils.format_dt(end_at_utc, style='R')
         creators_txt = ", ".join(creator_clicks) if creator_clicks else "—"  # clickable
 
-        desc = ""
-        if announce:
-            desc += announce + "\n\n"
-        desc += (
+        desc = (
             f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
             f"**Today we support Shops:** **{creators_txt}**\n\n"
-                        f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
+            f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
             f"or you're just window shopping."
         )
 
@@ -743,7 +822,6 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
         if pid:
             url = imvu_product_link(pid)
             rows.append(f"• <@{u}> — <{url}>")
-
         else:
             rows.append(f"• <@{u}>")
     lines = "\n".join(rows)
@@ -774,8 +852,6 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
         await channel.send(text, view=view_to_send)
     except Exception:
         pass
-
-
 
     for uid in picks:
         set_winner(uid)
@@ -898,11 +974,9 @@ async def giveaway_watcher():
             f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
         )
 
-        # Build gift buttons view (safe)
         # Build profile buttons view (one per winner)
         view = ui.View(timeout=None)
         for uid in picks:
-            # get the username this user submitted for THIS giveaway
             with db() as conn:
                 row = conn.execute(
                     "SELECT imvu_username FROM giveaway_entries "
@@ -912,11 +986,8 @@ async def giveaway_watcher():
             if not row or not row[0]:
                 continue
             uname = (row[0] or "").strip()
-        
-            # profile URL: https://www.imvu.com/next/av/<account>/
             u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", uname)
             url = f"https://www.imvu.com/next/av/{u_safe}/"
-        
             label = f"Gift {uname}"[:80]
             view.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         
@@ -929,7 +1000,6 @@ async def giveaway_watcher():
         except Exception as e:
             print(f"[wish] send failed for gid {gid} in ch {ch_id}: {e}")
 
-
         if posted:
             for uid in picks:
                 set_winner(uid)
@@ -939,7 +1009,8 @@ async def giveaway_watcher():
             # unclaim so the watcher can retry next tick
             with db() as conn:
                 conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
-#---
+
+# ---
 @tasks.loop(minutes=1)
 async def auto_starter():
     now = _now_local()
@@ -1000,6 +1071,7 @@ def imvu_product_link(pid: str) -> str:
     pid = re.sub(r"\D", "", str(pid))  # keep digits only
     return f"https://www.imvu.com/shop/product.php?products_id={pid}"
 
+# (dup of earlier helper kept for compatibility)
 def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional[str], Optional[str]]:
     with db() as conn:
         row = conn.execute(
@@ -1017,21 +1089,18 @@ def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional
     return (uname, pid)
 
 def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
-    """
-    Creates one Link Button per winner that opens their **wishlist**.
-    (Label still says 'Gift …' but now goes to WL.)
-    """
+    """Creates one Link Button per winner that opens their wishlist (kept for compatibility)."""
     v = ui.View(timeout=None)
     added = 0
     for uid in user_ids:
-        uname, pid = giveaway_entry_username_and_pid(gid, uid)
+        uname, _pid = giveaway_entry_username_and_pid(gid, uid)
         if not uname:
             continue
-        url = imvu_wishlist_link(uname)                       # <-- wishlist link
+        url = imvu_wishlist_link(uname)
         label = f"Gift {(uname or 'winner').strip().title()}"[:80]
         v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         added += 1
-        if added >= 25:  # Discord component cap
+        if added >= 25:
             break
     return v if added else None
 
@@ -1042,7 +1111,15 @@ def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
 async def settings_cmd(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("Admins only.", ephemeral=True)
-    # …existing code…
+    r = get_rules()
+    creators_txt = ", ".join([f"{cid}" + (f" ({lbl})" if lbl else "") for cid,lbl in list_creators()]) or "—"
+    await interaction.response.send_message(
+        f"Mode: **{r.get('mode')}** | Threshold: **{r.get('threshold')}**\n"
+        f"Min total items: **{r.get('min_total')}**\n"
+        f"MAP: `{r.get('map_json')}`\n"
+        f"Creators: {creators_txt}",
+        ephemeral=True
+    )
 
 @tree.command(name="sync", description="Admin: re-register slash commands here.")
 async def sync_cmd(interaction: discord.Interaction):
@@ -1058,24 +1135,16 @@ async def sync_cmd(interaction: discord.Interaction):
 async def on_ready():
     init_db()
     try:
-        # Register commands globally…
         await tree.sync(guild=None)
-        # …and per guild for instant visibility
         for g in bot.guilds:
             await tree.sync(guild=g)
         print("Slash commands synced.")
     except Exception as e:
         print("Slash sync failed:", e)
 
-    # start the draw loop
+    # NOTE: no persistent add_view here; views are per-message and work fine.
     if not giveaway_watcher.is_running():
         giveaway_watcher.start()
-
-    # ⬇️ start the auto daily/weekly poster loop
-    if not auto_starter.is_running():
-        auto_starter.start()
-
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-
 
 bot.run(TOKEN)
