@@ -505,7 +505,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                  f"**Ends:** {end_rel}\n\n"
                  f"**Today we support:** {creators_txt}\n\n"
                  f"**How to join**\n"
-                 f"• Click **Enter Giveaway** and submit your **IMVU username** + **up to 10 Product IDs/links**\n"
+                 f"• Click **Enter Giveaway** and submit your **IMVU username** + **follow instructions **\n"
                  f"• Only valid **participants** will be added in the **draw**")
 
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
@@ -540,6 +540,7 @@ async def giveaway_watcher():
 
     for gid, ch_id, msg_id, winners, prize in due:
         channel = bot.get_channel(int(ch_id))
+
         # disable button
         try:
             msg = await channel.fetch_message(int(msg_id))
@@ -547,38 +548,71 @@ async def giveaway_watcher():
         except Exception:
             pass
 
-        # Build eligible pool only from entries for this giveaway + cooldown check
+        # Pull entries for THIS giveaway
         entries = giveaway_entry_user_ids(gid)
+        winners_n = max(1, int(winners))
+
         picks: List[int] = []
         pool = list(entries)
         random.shuffle(pool)
 
-        with db() as conn:
-            cool_days = WIN_COOLDOWN_DAYS
-            for uid in pool:
-                cur = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?", (str(uid),))
-                row = cur.fetchone()
-                if not row or not row[0]:
-                    picks.append(uid)
-                else:
-                    try:
-                        lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
-                    except:
-                        lw = datetime.now(timezone.utc) - timedelta(days=9999)
-                    if lw <= datetime.now(timezone.utc) - timedelta(days=cool_days):
+        # Try to respect cooldown
+        if pool and WIN_COOLDOWN_DAYS > 0:
+            with db() as conn:
+                for uid in pool:
+                    row = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?", (str(uid),)).fetchone()
+                    if not row or not row[0]:
                         picks.append(uid)
-                if len(picks) >= max(1, int(winners)):
-                    break
+                    else:
+                        try:
+                            lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
+                        except:
+                            lw = datetime.now(timezone.utc) - timedelta(days=9999)
+                        if lw <= datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
+                            picks.append(uid)
+                    if len(picks) >= winners_n:
+                        break
 
-        mention_line = "No eligible Participants 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
-        text = f"🎉 **WISH Giveaway Ended**\n**Prize:** {prize}\n**Winner{'s' if len(picks)!=1 else ''}:**\n{mention_line}"
+        # PATCH: fallback — if cooldown excluded everyone, still pick from entries
+        if len(picks) < winners_n and pool:
+            remaining = [u for u in pool if u not in picks]
+            while remaining and len(picks) < winners_n:
+                picks.append(remaining.pop())
+
+        mention_line = "No entries 😔" if not pool else (
+            "No eligible Participants 😔" if not picks else "\n".join(f"• <@{uid}>" for uid in picks)
+        )
+        text = f"🎉 **WISH Giveaway Ended**\n**Prize:** {prize}\n**Winner{'s' if winners_n!=1 else ''}:**\n{mention_line}"
+
         try:
             await channel.send(text)
         except Exception:
             pass
+
         for uid in picks:
             set_winner(uid)
         giveaway_mark_done(gid)
+
+# PATCH: extract product image (og:image) from IMVU product pages
+PRODUCT_OG_IMAGE_RX = re.compile(
+    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+    re.I
+)
+
+async def product_image_url_by_pid(pid: str) -> Optional[str]:
+    timeout = aiohttp.ClientTimeout(total=12, connect=10)
+    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
+        for url in (
+            f"https://www.imvu.com/shop/product/{pid}",
+            f"https://www.imvu.com/shop/product.php?products_id={pid}",
+        ):
+            html = await _fetch_html(url, s, min_len=500)
+            if not html:
+                continue
+            m = PRODUCT_OG_IMAGE_RX.search(html)
+            if m:
+                return m.group(1)
+    return None
 
 # =========================
 # Utilities
