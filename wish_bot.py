@@ -373,7 +373,40 @@ def _eligible_by_creator_rule(per_creator: Dict[str,int], rules: Dict[str,str], 
         return True
 
     return True
+# Return (imvu_username, first_product_id) a user submitted in this giveaway
+def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional[str], Optional[str]]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT imvu_username, wishlist_product_id FROM giveaway_entries "
+            "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+            (gid, str(discord_id))
+        ).fetchone()
+    if not row:
+        return (None, None)
+    uname, raw_pid = row
+    pid = None
+    if raw_pid:
+        ids = parse_product_ids(str(raw_pid), limit=1)
+        pid = ids[0] if ids else None
+    return (uname, pid)
 
+# Build a Discord view with link buttons for each winner's product
+def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
+    buttons = []
+    for uid in user_ids:
+        uname, pid = giveaway_entry_username_and_pid(gid, uid)
+        if not pid:
+            continue
+        label = f"Gift for {uname or 'winner'}"
+        url = f"https://www.imvu.com/shop/product/{pid}"
+        buttons.append((label, url))
+    if not buttons:
+        return None
+    v = ui.View(timeout=None)
+    # Discord allows up to 25 buttons per message (5 rows x 5); you'll likely be far below that.
+    for label, url in buttons[:25]:
+        v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label[:80], url=url))
+    return v
 
 # =========================
 # Input sanitizers
@@ -410,7 +443,7 @@ def format_prize_text(prize: str) -> str:
     pids = parse_product_ids(prize, limit=5)
     links: List[str] = []
     for pid in pids:
-        links.append(f"<https://www.imvu.com/shop/product/{pid}>")
+        links.append(f"<{imvu_product_link(pid)}>")
     # include any raw http(s) links already in the text
     for m in URL_RX.findall(prize):
         if m not in links:
@@ -684,7 +717,9 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
     for u in picks:
         pid = giveaway_entry_product_id(giveaway_id, u)
         if pid:
-            rows.append(f"• <@{u}> — <https://www.imvu.com/shop/product/{pid}>")
+            url = imvu_product_link(pid)
+            rows.append(f"• <@{u}> — <{url}>")
+
         else:
             rows.append(f"• <@{u}>")
     lines = "\n".join(rows)
@@ -694,10 +729,12 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
         f"**Prize:** {format_prize_text(prize)}\n"
         f"**New winner{'s' if len(picks)!=1 else ''}:**\n{lines}"
     )
+    view = build_gift_view(gid, picks)
     try:
-        await channel.send(text)
+        await channel.send(text, view=view)
     except Exception:
         pass
+
 
     for uid in picks:
         set_winner(uid)
@@ -797,7 +834,9 @@ async def giveaway_watcher():
             for uid in picks:
                 pid = giveaway_entry_product_id(gid, uid)
                 if pid:
-                    rows.append(f"• <@{uid}> — <https://www.imvu.com/shop/product/{pid}>")
+                    url = imvu_product_link(pid)
+                    rows.append(f"• <@{uid}> — <{url}>")
+
                 else:
                     rows.append(f"• <@{uid}>")
             mention_line = "\n".join(rows)
@@ -808,10 +847,12 @@ async def giveaway_watcher():
             f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
         )
 
+        view = build_gift_view(giveaway_id, picks)
         try:
-            await channel.send(text)
+            await channel.send(text, view=view)
         except Exception:
             pass
+
 
         for uid in picks:
             set_winner(uid)
@@ -839,6 +880,10 @@ async def product_image_url_by_pid(pid: str) -> Optional[str]:
             if m:
                 return m.group(1)
     return None
+
+def imvu_product_link(pid: str) -> str:
+    pid = re.sub(r"\D", "", str(pid))  # just in case
+    return f"https://www.imvu.com/shop/product.php?products_id={pid}"
 
 # =========================
 # Utilities
