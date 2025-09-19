@@ -24,6 +24,7 @@ DB_PATH = os.getenv("DB_PATH", "wish.db")
 PRODUCT_SAMPLE_LIMIT = int(os.getenv("PRODUCT_SAMPLE_LIMIT", "60"))
 PRODUCT_CONCURRENCY = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
+ONE_WIN_ONLY = os.getenv("ONE_WIN_ONLY", "1") == "1"  # 1 = lifetime one win; set to 0 to disable
 
 try:
     from zoneinfo import ZoneInfo
@@ -537,18 +538,20 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
     shops    = ui.TextInput(label="Shops (IDs or shop URLs, comma/lines)",
                             style=discord.TextStyle.paragraph, required=False)
 
+    ##
     async def on_submit(self, interaction: discord.Interaction):
         # Fast validate first (no awaits here)
         try:
             secs = parse_duration_to_seconds(str(self.duration))
-            winners = max(1, int(str(self.winners)))
+            winners_typed = max(1, int(str(self.winners)))   # PATCH: keep what user typed
         except Exception as e:
-            return await interaction.response.send_message(f"Invalid: {e}", ephemeral=True)
+            await interaction.response.send_message(f"Invalid: {e}", ephemeral=True)
+            return
 
         prize = str(self.prize).strip()
         announce = str(self.announce or "").strip()
 
-        # ✅ ACK the modal right away so Discord doesn't time out
+        # ✅ ACK immediately so Discord doesn't time out
         await interaction.response.defer(thinking=True)
 
         # Resolve manufacturer IDs in "shops" to display names (time-boxed)
@@ -559,7 +562,6 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             add_creator(cid, None)  # ensure row exists
             name = None
             try:
-                # Time-box each lookup so we never stall the modal
                 name = await asyncio.wait_for(fetch_creator_name(cid), timeout=4.0)
             except Exception:
                 name = None
@@ -567,11 +569,14 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                 add_creator(cid, name)
                 creator_names.append(name)
             else:
-                creator_names.append(cid)  # graceful fallback to CID
+                creator_names.append(cid)  # fallback to CID
+
+        # PATCH: winners = number of unique shops when provided; else use what was typed
+        winners_n = len(unique_ids) if unique_ids else winners_typed
 
         end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
         gid = giveaway_insert(
-            interaction.channel.id, prize, announce, winners, end_at_utc.isoformat(), interaction.user.id
+            interaction.channel.id, prize, announce, winners_n, end_at_utc.isoformat(), interaction.user.id
         )
 
         end_rel = discord.utils.format_dt(end_at_utc, style='R')
@@ -580,25 +585,26 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         desc = ""
         if announce:
             desc += announce + "\n\n"
-        desc += (f"**Prize:** {prize}\n"
-                 f"**Winners:** {winners}\n"
-                 f"**Ends:** {end_rel}\n\n"
-                 f"**Today we support:** {creators_txt}\n\n"
-                 f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
-                 f"or you're just window shopping.")
-
+        desc += (
+            f"**Prize:** {prize}\n"
+            f"**Winners:** {winners_n}\n"
+            f"**Ends:** {end_rel}\n\n"
+            f"**Today we support Shops:** {creators_txt}\n\n"
+            f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
+            f"or you're just window shopping."
+        )
 
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
         embed.set_footer(text="Your name’s in, but without a WL it’s out. No WL, no win.")
         embed.add_field(name="Participants", value="0", inline=True)
 
-        # Post the giveaway; report any error back to the user (since we already deferred)
         try:
             msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
             giveaway_set_message(gid, msg.id)
             await interaction.followup.send(f"Giveaway posted ✅ (ID {gid})", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Couldn’t post the giveaway: {e}", ephemeral=True)
+
 
 
 @tree.command(name="wish", description="Create a WISH giveaway (admin only).")
@@ -633,22 +639,24 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
     if not pool:
         return await interaction.response.send_message("No remaining entrants to reroll from.", ephemeral=True)
 
+    # Lifetime lock for rerolls too (skip anyone who has EVER won any giveaway)
+    if ONE_WIN_ONLY:
+        with db() as conn:
+            pool = [
+                u for u in pool
+                if not (conn.execute(
+                    "SELECT last_win_at FROM Participants WHERE discord_id=?",
+                    (str(u),)
+                ).fetchone() or [None])[0]
+            ]
+        if not pool:
+            return await interaction.response.send_message(
+                "No eligible entrants left to reroll (lifetime one-win is enabled).",
+                ephemeral=True
+            )
+
     random.shuffle(pool)
     picks = pool[:max(1, int(count))]
-
-    # Announce & store
-    lines = "\n".join(f"• <@{u}>" for u in picks)
-    text = f"🔁 **REROLL** for Giveaway #{giveaway_id}\n**Prize:** {prize}\n**New winner{'s' if len(picks)!=1 else ''}:**\n{lines}"
-    try:
-        await channel.send(text)
-    except Exception:
-        pass
-
-    for uid in picks:
-        set_winner(uid)
-        add_giveaway_winner(giveaway_id, uid)
-
-    await interaction.response.send_message(f"Rerolled ✅ Picked {len(picks)} new winner(s).", ephemeral=True)
 
 # =========================
 # Draw/close watcher
