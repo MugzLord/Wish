@@ -300,6 +300,26 @@ async def product_creator_id(session: aiohttp.ClientSession, product_id: str, se
                 return cid
     cache_put(product_id, None)
     return None
+    
+# PATCH: fetch creator display name from IMVU search page
+CREATOR_NAME_RX = re.compile(r'by\s+([A-Za-z0-9_.-]{2,40})<', re.I)
+
+async def fetch_creator_name(mid: str) -> Optional[str]:
+    url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={mid}"
+    timeout = aiohttp.ClientTimeout(total=10, connect=8)
+    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
+        html = await _fetch_html(url, s, min_len=500)
+        if not html:
+            return None
+        m = CREATOR_NAME_RX.search(html)
+        if m:
+            return m.group(1)
+        # fallback: sometimes in <title> ... by NAME ...
+        m = re.search(r'<title>[^<]*by\s+([A-Za-z0-9_.-]{2,40})', html, re.I)
+        if m:
+            return m.group(1)
+    return None
+
 
 def cache_get(product_id: str) -> Optional[str]:
     with db() as conn:
@@ -585,6 +605,25 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
         add_giveaway_winner(giveaway_id, uid)
 
     await interaction.response.send_message(f"Rerolled ✅ Picked {len(picks)} new winner(s).", ephemeral=True)
+#creator helper
+# PATCH: fetch creator display name from IMVU search page
+CREATOR_NAME_RX = re.compile(r'by\s+([A-Za-z0-9_.-]{2,40})<', re.I)
+
+async def fetch_creator_name(mid: str) -> Optional[str]:
+    url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={mid}"
+    timeout = aiohttp.ClientTimeout(total=10, connect=8)
+    async with aiohttp.ClientSession(timeout=timeout, headers=DEFAULT_HEADERS) as s:
+        html = await _fetch_html(url, s, min_len=500)
+        if not html:
+            return None
+        m = CREATOR_NAME_RX.search(html)
+        if m:
+            return m.group(1)
+        # fallback: sometimes in <title> ... by NAME ...
+        m = re.search(r'<title>[^<]*by\s+([A-Za-z0-9_.-]{2,40})', html, re.I)
+        if m:
+            return m.group(1)
+    return None
 
 # =========================
 # Draw/close watcher
