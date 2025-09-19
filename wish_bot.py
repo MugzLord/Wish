@@ -25,6 +25,25 @@ PRODUCT_CONCURRENCY = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
 ONE_WIN_ONLY = os.getenv("ONE_WIN_ONLY", "1") == "1"  # 1 = lifetime one win; set to 0 to disable
 
+# ---- Auto starter ENV (Daily / Weekly) ----
+DAILY_CH_ID = int(os.getenv("DAILY_GIVEAWAY_CHANNEL_ID", "0"))
+DAILY_AT_LOCAL = os.getenv("DAILY_GIVEAWAY_TIME_LOCAL", "18:00")
+DAILY_DURATION = os.getenv("DAILY_GIVEAWAY_DURATION", "24h")
+DAILY_PRIZE = os.getenv("DAILY_GIVEAWAY_PRIZE", "")
+DAILY_WINNERS = int(os.getenv("DAILY_GIVEAWAY_WINNERS", "0"))
+DAILY_SHOPS = os.getenv("DAILY_GIVEAWAY_SHOPS", "")
+DAILY_ANNOUNCE = os.getenv("DAILY_GIVEAWAY_ANNOUNCE", "")
+
+WEEKLY_CH_ID = int(os.getenv("WEEKLY_GIVEAWAY_CHANNEL_ID", "0"))
+WEEKLY_WEEKDAY = os.getenv("WEEKLY_GIVEAWAY_WEEKDAY", "Sun")
+WEEKLY_AT_LOCAL = os.getenv("WEEKLY_GIVEAWAY_TIME_LOCAL", "18:00")
+WEEKLY_DURATION = os.getenv("WEEKLY_GIVEAWAY_DURATION", "24h")
+WEEKLY_PRIZE = os.getenv("WEEKLY_GIVEAWAY_PRIZE", "")
+WEEKLY_WINNERS = int(os.getenv("WEEKLY_GIVEAWAY_WINNERS", "0"))
+WEEKLY_SHOPS = os.getenv("WEEKLY_GIVEAWAY_SHOPS", "")
+WEEKLY_ANNOUNCE = os.getenv("WEEKLY_GIVEAWAY_ANNOUNCE", "")
+
+
 try:
     from zoneinfo import ZoneInfo
     LOCAL_TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Qatar"))
@@ -424,6 +443,69 @@ def format_prize_text(prize: str) -> str:
         if m not in links:
             links.append(m if m.startswith("<") else f"<{m}>")
     return ", ".join(links) if links else prize
+
+def _parse_hm(s: str) -> tuple[int, int]:
+    h, m = map(int, s.split(":"))
+    return h, m
+
+def _now_local():
+    return datetime.now(LOCAL_TZ)
+
+def _today_rule_key(prefix: str) -> str:
+    return f"{prefix}_{_now_local().date().isoformat()}"
+
+def _week_rule_key(prefix: str) -> str:
+    y, w, _ = _now_local().isocalendar()
+    return f"{prefix}_{y}W{w}"
+
+async def _create_and_post_giveaway(channel_id: int, duration_str: str, winners_int: int,
+                                    prize: str, announce: str, shops_str: str) -> bool:
+    """Post a giveaway message using the same logic as /wish."""
+    secs = parse_duration_to_seconds(duration_str)
+    ids = re.findall(r'(\d{5,})', shops_str or "")
+    unique_ids = list(dict.fromkeys(ids))
+
+    # resolve creator names (best effort)
+    creator_names: List[str] = []
+    for cid in unique_ids:
+        add_creator(cid, None)
+        try:
+            name = await asyncio.wait_for(fetch_creator_name(cid), timeout=4.0)
+        except Exception:
+            name = None
+        if name:
+            add_creator(cid, name)
+            creator_names.append(name)
+        else:
+            creator_names.append(cid)
+
+    winners_n = len(unique_ids) if (winners_int == 0 and unique_ids) else max(1, int(winners_int or 1))
+
+    end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
+    gid = giveaway_insert(channel_id, prize, announce, winners_n, end_at_utc.isoformat(), 0)
+
+    end_rel = discord.utils.format_dt(end_at_utc, style='R')
+    creators_txt = ", ".join(creator_names) if creator_names else "—"
+    desc = ""
+    if announce:
+        desc += announce + "\n\n"
+    desc += (f"**Prize:** {prize}\n"
+             f"**Winners:** {winners_n}\n"
+             f"**Ends:** {end_rel}\n\n"
+             f"**Today we support Shops:** {creators_txt}\n\n"
+             f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
+             f"or you're just window shopping.")
+
+    embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
+    embed.set_footer(text="Your name’s in, but without a WL it’s out. No WL, no win.")
+    embed.add_field(name="Participants", value="0", inline=True)
+
+    channel = bot.get_channel(int(channel_id))
+    if not channel:
+        return False
+    msg = await channel.send(embed=embed, view=EnterButton(gid))
+    giveaway_set_message(gid, msg.id)
+    return True
 
 # =========================
 # Creator helper (robust name resolver)
@@ -850,18 +932,36 @@ async def giveaway_watcher():
         )
 
         # Build gift buttons view (safe)
-        view = None
-        try:
-            view = build_gift_view(gid, picks)  # ← fixed var (was giveaway_id)
-        except Exception:
-            view = None
-
+        # Build profile buttons view (one per winner)
+        view = ui.View(timeout=None)
+        for uid in picks:
+            # get the username this user submitted for THIS giveaway
+            with db() as conn:
+                row = conn.execute(
+                    "SELECT imvu_username FROM giveaway_entries "
+                    "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+                    (gid, str(uid))
+                ).fetchone()
+            if not row or not row[0]:
+                continue
+            uname = (row[0] or "").strip()
+        
+            # profile URL: https://www.imvu.com/next/av/<account>/
+            u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", uname)
+            url = f"https://www.imvu.com/next/av/{u_safe}/"
+        
+            label = f"Gift for {uname}"[:80]
+            view.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
+        
+        view_to_send = view if len(view.children) > 0 else None
+        
         posted = False
         try:
-            await channel.send(text, view=view)
+            await channel.send(text, view=view_to_send)
             posted = True
         except Exception as e:
             print(f"[wish] send failed for gid {gid} in ch {ch_id}: {e}")
+
 
         if posted:
             for uid in picks:
@@ -872,6 +972,41 @@ async def giveaway_watcher():
             # unclaim so the watcher can retry next tick
             with db() as conn:
                 conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
+#---
+@tasks.loop(minutes=1)
+async def auto_starter():
+    now = _now_local()
+
+    # ---- Daily ----
+    if DAILY_CH_ID:
+        hh, mm = _parse_hm(DAILY_AT_LOCAL)
+        if now.hour == hh and now.minute == mm:
+            rk = _today_rule_key("auto_daily_posted")
+            rules = get_rules()
+            if rules.get(rk) != "1":
+                ok = await _create_and_post_giveaway(
+                    DAILY_CH_ID, DAILY_DURATION, DAILY_WINNERS,
+                    DAILY_PRIZE, DAILY_ANNOUNCE, DAILY_SHOPS
+                )
+                if ok:
+                    set_rule(rk, "1")
+
+    # ---- Weekly ----
+    if WEEKLY_CH_ID:
+        hh, mm = _parse_hm(WEEKLY_AT_LOCAL)
+        wd_map = {"mon":0,"tue":1,"wed":2,"thu":3,"fri":4,"sat":5,"sun":6}
+        wd_raw = str(WEEKLY_WEEKDAY).strip().lower()
+        want_wd = wd_map.get(wd_raw[:3], int(wd_raw) if wd_raw.isdigit() else 6)
+        if now.weekday() == want_wd and now.hour == hh and now.minute == mm:
+            rk = _week_rule_key("auto_weekly_posted")
+            rules = get_rules()
+            if rules.get(rk) != "1":
+                ok = await _create_and_post_giveaway(
+                    WEEKLY_CH_ID, WEEKLY_DURATION, WEEKLY_WINNERS,
+                    WEEKLY_PRIZE, WEEKLY_ANNOUNCE, WEEKLY_SHOPS
+                )
+                if ok:
+                    set_rule(rk, "1")
 
 # =========================
 # Optional: Product image helper (not wired to embed by default)
@@ -971,8 +1106,15 @@ async def on_ready():
     except Exception as e:
         print("Slash sync failed:", e)
 
+    # start the draw loop
     if not giveaway_watcher.is_running():
         giveaway_watcher.start()
+
+    # ⬇️ start the auto daily/weekly poster loop
+    if not auto_starter.is_running():
+        auto_starter.start()
+
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
 
 bot.run(TOKEN)
