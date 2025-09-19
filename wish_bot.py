@@ -25,24 +25,6 @@ PRODUCT_CONCURRENCY = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
 ONE_WIN_ONLY = os.getenv("ONE_WIN_ONLY", "1") == "1"  # 1 = lifetime one win; set to 0 to disable
 
-# ---- Auto starter ENV (Daily / Weekly) ----
-DAILY_CH_ID    = int((os.getenv("DAILY_GIVEAWAY_CHANNEL_ID") or "0").strip() or "0")
-DAILY_AT_LOCAL = os.getenv("DAILY_GIVEAWAY_TIME_LOCAL", "18:00")
-DAILY_DURATION = os.getenv("DAILY_GIVEAWAY_DURATION", "24h")
-DAILY_PRIZE    = os.getenv("DAILY_GIVEAWAY_PRIZE", "")
-DAILY_WINNERS  = int((os.getenv("DAILY_GIVEAWAY_WINNERS") or "0").strip() or "0")
-DAILY_SHOPS    = os.getenv("DAILY_GIVEAWAY_SHOPS", "")
-DAILY_ANNOUNCE = os.getenv("DAILY_GIVEAWAY_ANNOUNCE", "")
-
-WEEKLY_CH_ID    = int((os.getenv("WEEKLY_GIVEAWAY_CHANNEL_ID") or "0").strip() or "0")
-WEEKLY_WEEKDAY  = os.getenv("WEEKLY_GIVEAWAY_WEEKDAY", "Sun")
-WEEKLY_AT_LOCAL = os.getenv("WEEKLY_GIVEAWAY_TIME_LOCAL", "18:00")
-WEEKLY_DURATION = os.getenv("WEEKLY_GIVEAWAY_DURATION", "24h")
-WEEKLY_PRIZE    = os.getenv("WEEKLY_GIVEAWAY_PRIZE", "")
-WEEKLY_WINNERS  = int((os.getenv("WEEKLY_GIVEAWAY_WINNERS") or "0").strip() or "0")
-WEEKLY_SHOPS    = os.getenv("WEEKLY_GIVEAWAY_SHOPS", "")
-WEEKLY_ANNOUNCE = os.getenv("WEEKLY_GIVEAWAY_ANNOUNCE", "")
-
 
 try:
     from zoneinfo import ZoneInfo
@@ -402,19 +384,6 @@ async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
             break
     return v if added else None
     
-def _env_int(name: str, default: int = 0) -> int:
-    v = os.getenv(name, "")
-    if v is None:
-        return default
-    v = v.strip()
-    if not v:
-        return default
-    try:
-        return int(v)
-    except Exception:
-        return default
-
-
 # =========================
 # Input sanitizers
 # =========================
@@ -457,19 +426,6 @@ def format_prize_text(prize: str) -> str:
             links.append(m if m.startswith("<") else f"<{m}>")
     return ", ".join(links) if links else prize
 
-def _parse_hm(s: str) -> tuple[int, int]:
-    h, m = map(int, s.split(":"))
-    return h, m
-
-def _now_local():
-    return datetime.now(LOCAL_TZ)
-
-def _today_rule_key(prefix: str) -> str:
-    return f"{prefix}_{_now_local().date().isoformat()}"
-
-def _week_rule_key(prefix: str) -> str:
-    y, w, _ = _now_local().isocalendar()
-    return f"{prefix}_{y}W{w}"
 
 async def _create_and_post_giveaway(channel_id: int, duration_str: str, winners_int: int,
                                     prize: str, announce: str, shops_str: str) -> bool:
