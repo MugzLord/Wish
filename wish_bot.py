@@ -903,8 +903,41 @@ async def product_image_url_by_pid(pid: str) -> Optional[str]:
     return None
 
 def imvu_product_link(pid: str) -> str:
-    pid = re.sub(r"\D", "", str(pid))  # just in case
+    pid = re.sub(r"\D", "", str(pid))  # keep digits only
     return f"https://www.imvu.com/shop/product.php?products_id={pid}"
+
+def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional[str], Optional[str]]:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT imvu_username, wishlist_product_id FROM giveaway_entries "
+            "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+            (gid, str(discord_id))
+        ).fetchone()
+    if not row:
+        return (None, None)
+    uname, raw_pid = row
+    pid = None
+    if raw_pid:
+        ids = parse_product_ids(str(raw_pid), limit=1)
+        pid = ids[0] if ids else None
+    return (uname, pid)
+
+def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
+    """Creates one Link Button per winner that opens their submitted product."""
+    v = ui.View(timeout=None)
+    added = 0
+    for uid in user_ids:
+        uname, pid = giveaway_entry_username_and_pid(gid, uid)
+        if not pid:
+            continue
+        url = imvu_product_link(pid)          # <-- PHP route (reliable)
+        label = f"Gift for {(uname or 'winner').strip().title()}"[:80]
+        v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
+        added += 1
+        if added >= 25:                        # Discord max components per message
+            break
+    return v if added else None
+
 
 # =========================
 # Utilities
