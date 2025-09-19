@@ -408,10 +408,14 @@ def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
     return v
     
 def imvu_wishlist_link(username: str) -> str:
-    """Build a wishlist URL for a given IMVU username/display name."""
-    u = urllib.parse.quote((username or "").strip(), safe="")
-    # the modern/pretty route; IMVU redirects this correctly
-    return f"https://www.imvu.com/people/{u}/wishlist/"
+    """Return a wishlist URL that actually works on IMVU."""
+    u = (username or "").strip()
+    q = urllib.parse.quote(u, safe="")
+    # If it looks like a display name (has a space), prefer display_name=
+    if " " in u:
+        return f"https://www.imvu.com/catalog/web_wishlist.php?display_name={q}"
+    # Otherwise use the account name param
+    return f"https://www.imvu.com/catalog/web_wishlist.php?user={q}"
 
 # =========================
 # Input sanitizers
