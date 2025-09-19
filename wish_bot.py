@@ -544,7 +544,7 @@ async def _create_and_post_giveaway(channel_id: int, duration_str: str, winners_
     desc += (f"**Prize:** {prize}\n"
              f"**Winners:** {winners_n}\n"
              f"**Ends:** {end_rel}\n\n"
-             f"**Today we support Shops:** {creators_txt}\n\n"
+             f"**This round we support Shops:** **{creators_txt}**\n\n"
              f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
              f"or you're just window shopping.")
 
@@ -747,7 +747,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
-            f"**Today we support Shops:** **{creators_txt}**\n\n"
+            f"**This round we support Shops:** **{creators_txt}**\n\n"
             f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
             f"or you're just window shopping."
         )
@@ -969,8 +969,8 @@ async def giveaway_watcher():
             mention_line = "\n".join(rows)
 
         text = (
-            f"🎉 **WISH Giveaway Ended**\n"
-            f"**Prize:** {format_prize_text(prize)}\n"
+            f"**WISH Giveaway Ended**\n\n"
+            f"**Prize:** {format_prize_text(prize)}\n\n"
             f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
         )
 
