@@ -743,7 +743,9 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         end_rel = discord.utils.format_dt(end_at_utc, style='R')
         creators_txt = ", ".join(creator_clicks) if creator_clicks else "—"  # clickable
 
+        host_mention = interaction.user.mention  # <-- the person who ran /wish
         desc = (
+            f"**Hosted by:** {host_mention}\n\n"
             f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
