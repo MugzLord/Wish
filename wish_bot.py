@@ -406,6 +406,12 @@ def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
     for label, url in buttons[:25]:
         v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label[:80], url=url))
     return v
+    
+def imvu_wishlist_link(username: str) -> str:
+    """Build a wishlist URL for a given IMVU username/display name."""
+    u = urllib.parse.quote((username or "").strip(), safe="")
+    # the modern/pretty route; IMVU redirects this correctly
+    return f"https://www.imvu.com/people/{u}/wishlist/"
 
 # =========================
 # Input sanitizers
@@ -922,21 +928,23 @@ def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional
     return (uname, pid)
 
 def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
-    """Creates one Link Button per winner that opens their submitted product."""
+    """
+    Creates one Link Button per winner that opens their **wishlist**.
+    (Label still says 'Gift for …' but now goes to WL.)
+    """
     v = ui.View(timeout=None)
     added = 0
     for uid in user_ids:
         uname, pid = giveaway_entry_username_and_pid(gid, uid)
-        if not pid:
+        if not uname:
             continue
-        url = imvu_product_link(pid)          # <-- PHP route (reliable)
+        url = imvu_wishlist_link(uname)                       # <-- wishlist link
         label = f"Gift for {(uname or 'winner').strip().title()}"[:80]
         v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         added += 1
-        if added >= 25:                        # Discord max components per message
+        if added >= 25:  # Discord component cap
             break
     return v if added else None
-
 
 # =========================
 # Utilities
