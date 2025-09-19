@@ -611,11 +611,9 @@ def parse_duration_to_seconds(s: str) -> int:
     return n * mult
 
 class WishSingle(ui.Modal, title="Create WISH Giveaway"):
-    duration = ui.TextInput(label="Duration", placeholder="24h, 3d, 45m, 1w", required=True)
+    duration = ui.TextInput(label="Duration", placeholder="30m, 24h, 3d, 1w", required=True)
     winners  = ui.TextInput(label="Number of Winners", placeholder="1", required=True, max_length=4)
     prize    = ui.TextInput(label="Prize", placeholder="Text or URL", required=True)
-    announce = ui.TextInput(label="Announcement text (you can @Role here)",
-                            style=discord.TextStyle.paragraph, required=False)
     shops    = ui.TextInput(label="Shops (IDs or shop URLs, comma/lines)",
                             style=discord.TextStyle.paragraph, required=False)
 
@@ -630,7 +628,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             return
 
         prize = str(self.prize).strip()
-        announce = str(self.announce or "").strip()
+        # announce = str(self.announce or "").strip()
 
         # ✅ ACK immediately so Discord doesn't time out
         await interaction.response.defer()  # acknowledge with no visible message
@@ -670,8 +668,8 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
-            f"**Today we support Shops:** {creators_txt}\n\n"
-            f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
+            f"**Today we support Shops:** {**creators_txt**}\n\n"
+                        f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
             f"or you're just window shopping."
         )
 
@@ -919,7 +917,7 @@ async def giveaway_watcher():
             u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", uname)
             url = f"https://www.imvu.com/next/av/{u_safe}/"
         
-            label = f"Gift for {uname}"[:80]
+            label = f"Gift {uname}"[:80]
             view.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         
         view_to_send = view if len(view.children) > 0 else None
