@@ -668,7 +668,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
-            f"**Today we support Shops:** {**creators_txt**}\n\n"
+            f"**Today we support Shops:** **{creators_txt}**\n\n"
                         f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
             f"or you're just window shopping."
         )
