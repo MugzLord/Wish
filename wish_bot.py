@@ -645,8 +645,8 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
     duration = ui.TextInput(label="Duration", placeholder="24h, 3d, 45m, 1w", required=True)
     winners  = ui.TextInput(label="Number of Winners", placeholder="1", required=True, max_length=4)
     prize    = ui.TextInput(label="Prize", placeholder="Text or URL", required=True)
-    announce = ui.TextInput(label="Announcement text (you can @Role here)",
-                            style=discord.TextStyle.paragraph, required=False)
+    #announce = ui.TextInput(label="Announcement text (you can @Role here)",
+                            #style=discord.TextStyle.paragraph, required=False)
     shops    = ui.TextInput(label="Shops (IDs or shop URLs, comma/lines)",
                             style=discord.TextStyle.paragraph, required=False)
 
@@ -661,7 +661,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             return
 
         prize = str(self.prize).strip()
-        announce = str(self.announce or "").strip()
+        #announce = str(self.announce or "").strip()
 
         # ✅ ACK immediately so Discord doesn't time out
         await interaction.response.defer()  # acknowledge with no visible message
@@ -701,7 +701,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
-            f"**Today we support Shops:** {creators_txt}\n\n"
+            f"**Today we support Shops:** **{creators_txt}**\n\n"
             f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
             f"or you're just window shopping."
         )
@@ -926,8 +926,8 @@ async def giveaway_watcher():
             mention_line = "\n".join(rows)
 
         text = (
-            f"🎉 **WISH Giveaway Ended**\n"
-            f"**Prize:** {format_prize_text(prize)}\n"
+            f"🎉 **WISH Giveaway Ended**\n\n"
+            f"**Prize:** {format_prize_text(prize)}\n\n"
             f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
         )
 
