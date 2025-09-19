@@ -506,10 +506,10 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
                  f"**Today we support:** {creators_txt}\n\n"
                  f"**How to join**\n"
                  f"• Click **Enter Giveaway** and submit your **IMVU username** + **up to 10 Product IDs/links**\n"
-                 f"• Wishlist must be **public** and meet **min items/creator rules**")
+                 f"• Only valid **participants** will be added in the **draw**")
 
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
-        embed.set_footer(text="Only verified Participants are eligible • No wishlist, no win")
+        embed.set_footer(text="Your name’s in, but without a WL it’s out. No WL, no win.")
         embed.add_field(name="Participants", value="0", inline=True)
 
         await interaction.response.defer(thinking=True)
