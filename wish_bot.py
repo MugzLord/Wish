@@ -10,7 +10,6 @@ import aiohttp
 import discord
 from discord import ui, app_commands
 from discord.ext import commands, tasks
-
 # =========================
 # Config / ENV 
 # =========================
