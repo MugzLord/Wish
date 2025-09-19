@@ -537,68 +537,68 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
     shops    = ui.TextInput(label="Shops (IDs or shop URLs, comma/lines)",
                             style=discord.TextStyle.paragraph, required=False)
 
-        async def on_submit(self, interaction: discord.Interaction):
-            # Fast validate first (no awaits here)
-            try:
-                secs = parse_duration_to_seconds(str(self.duration))
-                winners = max(1, int(str(self.winners)))
-            except Exception as e:
-                return await interaction.response.send_message(f"Invalid: {e}", ephemeral=True)
-    
-            prize = str(self.prize).strip()
-            announce = str(self.announce or "").strip()
-    
-            # ✅ ACK the modal right away so Discord doesn't time out
-            await interaction.response.defer(thinking=True)
-    
-            # Resolve manufacturer IDs in "shops" to display names (time-boxed)
-            ids = re.findall(r'(\d{5,})', str(self.shops or ""))
-            unique_ids = list(dict.fromkeys(ids))
-            creator_names: List[str] = []
-            for cid in unique_ids:
-                add_creator(cid, None)  # ensure row exists
-                name = None
-                try:
-                    # Time-box each lookup so we never stall the modal
-                    name = await asyncio.wait_for(fetch_creator_name(cid), timeout=4.0)
-                except Exception:
-                    name = None
-                if name:
-                    add_creator(cid, name)
-                    creator_names.append(name)
-                else:
-                    creator_names.append(cid)  # graceful fallback to CID
-    
-            end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
-            gid = giveaway_insert(
-                interaction.channel.id, prize, announce, winners, end_at_utc.isoformat(), interaction.user.id
-            )
-    
-            end_rel = discord.utils.format_dt(end_at_utc, style='R')
-            creators_txt = ", ".join(creator_names) if creator_names else "—"
-    
-            desc = ""
-            if announce:
-                desc += announce + "\n\n"
-            desc += (f"**Prize:** {prize}\n"
-                     f"**Winners:** {winners}\n"
-                     f"**Ends:** {end_rel}\n\n"
-                     f"**Today we support:** {creators_txt}\n\n"
-                     f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
-                     f"or you're just window shopping.")
+    async def on_submit(self, interaction: discord.Interaction):
+        # Fast validate first (no awaits here)
+        try:
+            secs = parse_duration_to_seconds(str(self.duration))
+            winners = max(1, int(str(self.winners)))
+        except Exception as e:
+            return await interaction.response.send_message(f"Invalid: {e}", ephemeral=True)
 
-    
-            embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
-            embed.set_footer(text="Your name’s in, but without a WL it’s out. No WL, no win.")
-            embed.add_field(name="Participants", value="0", inline=True)
-    
-            # Post the giveaway; report any error back to the user (since we already deferred)
+        prize = str(self.prize).strip()
+        announce = str(self.announce or "").strip()
+
+        # ✅ ACK the modal right away so Discord doesn't time out
+        await interaction.response.defer(thinking=True)
+
+        # Resolve manufacturer IDs in "shops" to display names (time-boxed)
+        ids = re.findall(r'(\d{5,})', str(self.shops or ""))
+        unique_ids = list(dict.fromkeys(ids))
+        creator_names: List[str] = []
+        for cid in unique_ids:
+            add_creator(cid, None)  # ensure row exists
+            name = None
             try:
-                msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
-                giveaway_set_message(gid, msg.id)
-                await interaction.followup.send(f"Giveaway posted ✅ (ID {gid})", ephemeral=True)
-            except Exception as e:
-                await interaction.followup.send(f"Couldn’t post the giveaway: {e}", ephemeral=True)
+                # Time-box each lookup so we never stall the modal
+                name = await asyncio.wait_for(fetch_creator_name(cid), timeout=4.0)
+            except Exception:
+                name = None
+            if name:
+                add_creator(cid, name)
+                creator_names.append(name)
+            else:
+                creator_names.append(cid)  # graceful fallback to CID
+
+        end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        gid = giveaway_insert(
+            interaction.channel.id, prize, announce, winners, end_at_utc.isoformat(), interaction.user.id
+        )
+
+        end_rel = discord.utils.format_dt(end_at_utc, style='R')
+        creators_txt = ", ".join(creator_names) if creator_names else "—"
+
+        desc = ""
+        if announce:
+            desc += announce + "\n\n"
+        desc += (f"**Prize:** {prize}\n"
+                 f"**Winners:** {winners}\n"
+                 f"**Ends:** {end_rel}\n\n"
+                 f"**Today we support:** {creators_txt}\n\n"
+                 f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
+                 f"or you're just window shopping.")
+
+
+        embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
+        embed.set_footer(text="Your name’s in, but without a WL it’s out. No WL, no win.")
+        embed.add_field(name="Participants", value="0", inline=True)
+
+        # Post the giveaway; report any error back to the user (since we already deferred)
+        try:
+            msg = await interaction.channel.send(embed=embed, view=EnterButton(gid))
+            giveaway_set_message(gid, msg.id)
+            await interaction.followup.send(f"Giveaway posted ✅ (ID {gid})", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"Couldn’t post the giveaway: {e}", ephemeral=True)
 
 
 @tree.command(name="wish", description="Create a WISH giveaway (admin only).")
