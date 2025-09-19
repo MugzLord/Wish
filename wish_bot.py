@@ -26,23 +26,22 @@ PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
 ONE_WIN_ONLY = os.getenv("ONE_WIN_ONLY", "1") == "1"  # 1 = lifetime one win; set to 0 to disable
 
 # ---- Auto starter ENV (Daily / Weekly) ----
-DAILY_CH_ID = int(os.getenv("DAILY_GIVEAWAY_CHANNEL_ID", "0"))
+DAILY_CH_ID   = _env_int("DAILY_GIVEAWAY_CHANNEL_ID", 0)
 DAILY_AT_LOCAL = os.getenv("DAILY_GIVEAWAY_TIME_LOCAL", "18:00")
 DAILY_DURATION = os.getenv("DAILY_GIVEAWAY_DURATION", "24h")
-DAILY_PRIZE = os.getenv("DAILY_GIVEAWAY_PRIZE", "")
-DAILY_WINNERS = int(os.getenv("DAILY_GIVEAWAY_WINNERS", "0"))
-DAILY_SHOPS = os.getenv("DAILY_GIVEAWAY_SHOPS", "")
+DAILY_PRIZE    = os.getenv("DAILY_GIVEAWAY_PRIZE", "")
+DAILY_WINNERS  = _env_int("DAILY_GIVEAWAY_WINNERS", 0)
+DAILY_SHOPS    = os.getenv("DAILY_GIVEAWAY_SHOPS", "")
 DAILY_ANNOUNCE = os.getenv("DAILY_GIVEAWAY_ANNOUNCE", "")
 
-WEEKLY_CH_ID = int(os.getenv("WEEKLY_GIVEAWAY_CHANNEL_ID", "0"))
-WEEKLY_WEEKDAY = os.getenv("WEEKLY_GIVEAWAY_WEEKDAY", "Sun")
+WEEKLY_CH_ID    = _env_int("WEEKLY_GIVEAWAY_CHANNEL_ID", 0)
+WEEKLY_WEEKDAY  = os.getenv("WEEKLY_GIVEAWAY_WEEKDAY", "Sun")
 WEEKLY_AT_LOCAL = os.getenv("WEEKLY_GIVEAWAY_TIME_LOCAL", "18:00")
 WEEKLY_DURATION = os.getenv("WEEKLY_GIVEAWAY_DURATION", "24h")
-WEEKLY_PRIZE = os.getenv("WEEKLY_GIVEAWAY_PRIZE", "")
-WEEKLY_WINNERS = int(os.getenv("WEEKLY_GIVEAWAY_WINNERS", "0"))
-WEEKLY_SHOPS = os.getenv("WEEKLY_GIVEAWAY_SHOPS", "")
+WEEKLY_PRIZE    = os.getenv("WEEKLY_GIVEAWAY_PRIZE", "")
+WEEKLY_WINNERS  = _env_int("WEEKLY_GIVEAWAY_WINNERS", 0)
+WEEKLY_SHOPS    = os.getenv("WEEKLY_GIVEAWAY_SHOPS", "")
 WEEKLY_ANNOUNCE = os.getenv("WEEKLY_GIVEAWAY_ANNOUNCE", "")
-
 
 try:
     from zoneinfo import ZoneInfo
@@ -401,6 +400,19 @@ async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
         if added >= 25:
             break
     return v if added else None
+    
+def _env_int(name: str, default: int = 0) -> int:
+    v = os.getenv(name, "")
+    if v is None:
+        return default
+    v = v.strip()
+    if not v:
+        return default
+    try:
+        return int(v)
+    except Exception:
+        return default
+
 
 # =========================
 # Input sanitizers
