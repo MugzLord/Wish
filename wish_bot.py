@@ -771,16 +771,27 @@ async def giveaway_watcher():
         return
 
     for gid, ch_id, msg_id, winners, prize in due:
-        # PATCH: claim so only one loop/worker processes it
+        # claim so only one loop/worker processes it
         if not giveaway_claim(gid):
             continue
 
+        # --- safely get the channel (cache OR API) ---
         channel = bot.get_channel(int(ch_id))
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(int(ch_id))
+            except Exception as e:
+                print(f"[wish] fetch_channel failed for ch {ch_id}: {e}")
+                # unclaim so we retry next tick
+                with db() as conn:
+                    conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
+                continue
 
-        # disable button
+        # disable button (best-effort)
         try:
-            msg = await channel.fetch_message(int(msg_id))
-            await msg.edit(view=EnterButton(gid, disabled=True))
+            if int(msg_id):
+                msg = await channel.fetch_message(int(msg_id))
+                await msg.edit(view=EnterButton(gid, disabled=True))
         except Exception:
             pass
 
@@ -834,9 +845,8 @@ async def giveaway_watcher():
             for uid in picks:
                 pid = giveaway_entry_product_id(gid, uid)
                 if pid:
-                    url = imvu_product_link(pid)
+                    url = imvu_product_link(pid)  # PHP route is more reliable
                     rows.append(f"• <@{uid}> — <{url}>")
-
                 else:
                     rows.append(f"• <@{uid}>")
             mention_line = "\n".join(rows)
@@ -847,18 +857,29 @@ async def giveaway_watcher():
             f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
         )
 
-        view = build_gift_view(giveaway_id, picks)
+        # Build gift buttons view (safe)
+        view = None
+        try:
+            view = build_gift_view(gid, picks)  # ← fixed var (was giveaway_id)
+        except Exception:
+            view = None
+
+        posted = False
         try:
             await channel.send(text, view=view)
-        except Exception:
-            pass
+            posted = True
+        except Exception as e:
+            print(f"[wish] send failed for gid {gid} in ch {ch_id}: {e}")
 
-
-        for uid in picks:
-            set_winner(uid)
-            add_giveaway_winner(gid, uid)  # log winner for rerolls
-        
-        giveaway_mark_done(gid)
+        if posted:
+            for uid in picks:
+                set_winner(uid)
+                add_giveaway_winner(gid, uid)  # log winner for rerolls
+            giveaway_mark_done(gid)
+        else:
+            # unclaim so the watcher can retry next tick
+            with db() as conn:
+                conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
 
 # =========================
 # Optional: Product image helper (not wired to embed by default)
