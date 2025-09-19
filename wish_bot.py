@@ -25,24 +25,6 @@ PRODUCT_CONCURRENCY = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
 ONE_WIN_ONLY = os.getenv("ONE_WIN_ONLY", "1") == "1"  # 1 = lifetime one win; set to 0 to disable
 
-# ---- Auto starter ENV (Daily / Weekly) ----
-DAILY_CH_ID = int(os.getenv("DAILY_GIVEAWAY_CHANNEL_ID", "0"))
-DAILY_AT_LOCAL = os.getenv("DAILY_GIVEAWAY_TIME_LOCAL", "18:00")
-DAILY_DURATION = os.getenv("DAILY_GIVEAWAY_DURATION", "24h")
-DAILY_PRIZE = os.getenv("DAILY_GIVEAWAY_PRIZE", "")
-DAILY_WINNERS = int(os.getenv("DAILY_GIVEAWAY_WINNERS", "0"))
-DAILY_SHOPS = os.getenv("DAILY_GIVEAWAY_SHOPS", "")
-DAILY_ANNOUNCE = os.getenv("DAILY_GIVEAWAY_ANNOUNCE", "")
-
-WEEKLY_CH_ID = int(os.getenv("WEEKLY_GIVEAWAY_CHANNEL_ID", "0"))
-WEEKLY_WEEKDAY = os.getenv("WEEKLY_GIVEAWAY_WEEKDAY", "Sun")
-WEEKLY_AT_LOCAL = os.getenv("WEEKLY_GIVEAWAY_TIME_LOCAL", "18:00")
-WEEKLY_DURATION = os.getenv("WEEKLY_GIVEAWAY_DURATION", "24h")
-WEEKLY_PRIZE = os.getenv("WEEKLY_GIVEAWAY_PRIZE", "")
-WEEKLY_WINNERS = int(os.getenv("WEEKLY_GIVEAWAY_WINNERS", "0"))
-WEEKLY_SHOPS = os.getenv("WEEKLY_GIVEAWAY_SHOPS", "")
-WEEKLY_ANNOUNCE = os.getenv("WEEKLY_GIVEAWAY_ANNOUNCE", "")
-
 
 try:
     from zoneinfo import ZoneInfo
@@ -401,7 +383,7 @@ async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
         if added >= 25:
             break
     return v if added else None
-
+    
 # =========================
 # Input sanitizers
 # =========================
@@ -444,19 +426,6 @@ def format_prize_text(prize: str) -> str:
             links.append(m if m.startswith("<") else f"<{m}>")
     return ", ".join(links) if links else prize
 
-def _parse_hm(s: str) -> tuple[int, int]:
-    h, m = map(int, s.split(":"))
-    return h, m
-
-def _now_local():
-    return datetime.now(LOCAL_TZ)
-
-def _today_rule_key(prefix: str) -> str:
-    return f"{prefix}_{_now_local().date().isoformat()}"
-
-def _week_rule_key(prefix: str) -> str:
-    y, w, _ = _now_local().isocalendar()
-    return f"{prefix}_{y}W{w}"
 
 async def _create_and_post_giveaway(channel_id: int, duration_str: str, winners_int: int,
                                     prize: str, announce: str, shops_str: str) -> bool:
@@ -642,11 +611,9 @@ def parse_duration_to_seconds(s: str) -> int:
     return n * mult
 
 class WishSingle(ui.Modal, title="Create WISH Giveaway"):
-    duration = ui.TextInput(label="Duration", placeholder="24h, 3d, 45m, 1w", required=True)
+    duration = ui.TextInput(label="Duration", placeholder="30m, 24h, 3d, 1w", required=True)
     winners  = ui.TextInput(label="Number of Winners", placeholder="1", required=True, max_length=4)
     prize    = ui.TextInput(label="Prize", placeholder="Text or URL", required=True)
-    #announce = ui.TextInput(label="Announcement text (you can @Role here)",
-                            #style=discord.TextStyle.paragraph, required=False)
     shops    = ui.TextInput(label="Shops (IDs or shop URLs, comma/lines)",
                             style=discord.TextStyle.paragraph, required=False)
 
@@ -661,7 +628,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             return
 
         prize = str(self.prize).strip()
-        #announce = str(self.announce or "").strip()
+        # announce = str(self.announce or "").strip()
 
         # ✅ ACK immediately so Discord doesn't time out
         await interaction.response.defer()  # acknowledge with no visible message
@@ -702,7 +669,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
             f"**Today we support Shops:** **{creators_txt}**\n\n"
-            f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
+                        f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
             f"or you're just window shopping."
         )
 
@@ -926,8 +893,8 @@ async def giveaway_watcher():
             mention_line = "\n".join(rows)
 
         text = (
-            f"🎉 **WISH Giveaway Ended**\n\n"
-            f"**Prize:** {format_prize_text(prize)}\n\n"
+            f"🎉 **WISH Giveaway Ended**\n"
+            f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
         )
 
@@ -950,7 +917,7 @@ async def giveaway_watcher():
             u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", uname)
             url = f"https://www.imvu.com/next/av/{u_safe}/"
         
-            label = f"Gift for {uname}"[:80]
+            label = f"Gift {uname}"[:80]
             view.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
         
         view_to_send = view if len(view.children) > 0 else None
@@ -1073,15 +1040,9 @@ def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
 # =========================
 @tree.command(name="settings", description="Show current settings.")
 async def settings_cmd(interaction: discord.Interaction):
-    r = get_rules()
-    creators_txt = ", ".join([f"{cid}" + (f" ({lbl})" if lbl else "") for cid,lbl in list_creators()]) or "—"
-    await interaction.response.send_message(
-        f"Mode: **{r.get('mode')}** | Threshold: **{r.get('threshold')}**\n"
-        f"Min total items: **{r.get('min_total')}**\n"
-        f"MAP: `{r.get('map_json')}`\n"
-        f"Creators: {creators_txt}",
-        ephemeral=True
-    )
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+    # …existing code…
 
 @tree.command(name="sync", description="Admin: re-register slash commands here.")
 async def sync_cmd(interaction: discord.Interaction):
