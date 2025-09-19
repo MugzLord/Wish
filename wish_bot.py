@@ -1086,15 +1086,9 @@ def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
 # =========================
 @tree.command(name="settings", description="Show current settings.")
 async def settings_cmd(interaction: discord.Interaction):
-    r = get_rules()
-    creators_txt = ", ".join([f"{cid}" + (f" ({lbl})" if lbl else "") for cid,lbl in list_creators()]) or "—"
-    await interaction.response.send_message(
-        f"Mode: **{r.get('mode')}** | Threshold: **{r.get('threshold')}**\n"
-        f"Min total items: **{r.get('min_total')}**\n"
-        f"MAP: `{r.get('map_json')}`\n"
-        f"Creators: {creators_txt}",
-        ephemeral=True
-    )
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+    # …existing code…
 
 @tree.command(name="sync", description="Admin: re-register slash commands here.")
 async def sync_cmd(interaction: discord.Interaction):
