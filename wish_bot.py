@@ -89,6 +89,14 @@ def init_db():
           status TEXT DEFAULT 'OPEN'
         );""")
         conn.execute("""
+        CREATE TABLE IF NOT EXISTS giveaway_winners(
+          giveaway_id INTEGER NOT NULL,
+          discord_id  TEXT NOT NULL,
+          created_at  TEXT NOT NULL,
+          PRIMARY KEY (giveaway_id, discord_id)
+        );""")
+
+        conn.execute("""
         CREATE TABLE IF NOT EXISTS giveaway_entries(
           giveaway_id INTEGER NOT NULL,
           discord_id  TEXT NOT NULL,
@@ -178,6 +186,18 @@ def giveaway_count_entries(gid: int) -> int:
 def giveaway_entry_user_ids(gid: int) -> List[int]:
     with db() as conn:
         cur = conn.execute("SELECT DISTINCT discord_id FROM giveaway_entries WHERE giveaway_id=?", (gid,))
+        return [int(r[0]) for r in cur.fetchall()]
+        
+def add_giveaway_winner(gid: int, discord_id: int):
+    with db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO giveaway_winners(giveaway_id, discord_id, created_at) VALUES(?,?,datetime('now'))",
+            (gid, str(discord_id))
+        )
+
+def list_giveaway_winners(gid: int) -> List[int]:
+    with db() as conn:
+        cur = conn.execute("SELECT discord_id FROM giveaway_winners WHERE giveaway_id=?", (gid,))
         return [int(r[0]) for r in cur.fetchall()]
 
 # =========================
@@ -523,6 +543,49 @@ async def wish_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Admins only.", ephemeral=True)
     await interaction.response.send_modal(WishSingle())
 
+#reroll command
+from discord import app_commands  # if not already imported at top
+
+@tree.command(name="reroll", description="Admin: reroll winner(s) for a past giveaway.")
+@app_commands.describe(giveaway_id="Giveaway ID (see bot message or DB)", count="How many new winners (default 1)")
+async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: int = 1):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+
+    # Look up giveaway channel to announce reroll there
+    with db() as conn:
+        row = conn.execute("SELECT channel_id, prize FROM giveaways WHERE id=?", (giveaway_id,)).fetchone()
+    if not row:
+        return await interaction.response.send_message("Unknown giveaway ID.", ephemeral=True)
+    ch_id, prize = int(row[0]), row[1]
+    channel = bot.get_channel(ch_id)
+    if not channel:
+        return await interaction.response.send_message("I can't see that channel anymore.", ephemeral=True)
+
+    # Build a pool: users who actually entered that giveaway, excluding previous winners of the SAME giveaway
+    entries = giveaway_entry_user_ids(giveaway_id)
+    already = set(list_giveaway_winners(giveaway_id))
+    pool = [u for u in entries if u not in already]
+    if not pool:
+        return await interaction.response.send_message("No remaining entrants to reroll from.", ephemeral=True)
+
+    random.shuffle(pool)
+    picks = pool[:max(1, int(count))]
+
+    # Announce & store
+    lines = "\n".join(f"• <@{u}>" for u in picks)
+    text = f"🔁 **REROLL** for Giveaway #{giveaway_id}\n**Prize:** {prize}\n**New winner{'s' if len(picks)!=1 else ''}:**\n{lines}"
+    try:
+        await channel.send(text)
+    except Exception:
+        pass
+
+    for uid in picks:
+        set_winner(uid)
+        add_giveaway_winner(giveaway_id, uid)
+
+    await interaction.response.send_message(f"Rerolled ✅ Picked {len(picks)} new winner(s).", ephemeral=True)
+
 # =========================
 # Draw/close watcher
 # =========================
@@ -591,7 +654,10 @@ async def giveaway_watcher():
 
         for uid in picks:
             set_winner(uid)
+            add_giveaway_winner(gid, uid)  # log winner for rerolls
+        
         giveaway_mark_done(gid)
+
 
 # PATCH: extract product image (og:image) from IMVU product pages
 PRODUCT_OG_IMAGE_RX = re.compile(
