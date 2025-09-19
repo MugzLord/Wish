@@ -12,7 +12,7 @@ from discord import ui, app_commands
 from discord.ext import commands, tasks
 
 # =========================
-# Config / ENV
+# Config / ENV 
 # =========================
 TOKEN = os.getenv("DISCORD_TOKEN") or ""
 if not TOKEN:
