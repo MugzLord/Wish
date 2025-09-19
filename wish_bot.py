@@ -209,13 +209,9 @@ def list_giveaway_winners(gid: int) -> List[int]:
         return [int(r[0]) for r in cur.fetchall()]
         
 def imvu_profile_link(username: str) -> str:
-    """
-    Build a stable IMVU profile URL (next/av/<account>).
-    Works best when entrants type their *account name* (no spaces).
-    """
+    """Stable IMVU profile URL: /next/av/<account>/"""
     u = (username or "").strip()
-    # keep a safe path segment (IMVU account names are letters/digits/._-)
-    u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", u)
+    u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", u)  # account names only
     return f"https://www.imvu.com/next/av/{u_safe}/"
 
 # =========================
