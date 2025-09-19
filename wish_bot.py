@@ -207,6 +207,16 @@ def list_giveaway_winners(gid: int) -> List[int]:
     with db() as conn:
         cur = conn.execute("SELECT discord_id FROM giveaway_winners WHERE giveaway_id=?", (gid,))
         return [int(r[0]) for r in cur.fetchall()]
+        
+def imvu_profile_link(username: str) -> str:
+    """
+    Build a stable IMVU profile URL (next/av/<account>).
+    Works best when entrants type their *account name* (no spaces).
+    """
+    u = (username or "").strip()
+    # keep a safe path segment (IMVU account names are letters/digits/._-)
+    u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", u)
+    return f"https://www.imvu.com/next/av/{u_safe}/"
 
 # =========================
 # Scraping & eligibility (left intact; not used for entry anymore)
@@ -389,23 +399,24 @@ def giveaway_entry_username_and_pid(gid: int, discord_id: int) -> Tuple[Optional
         pid = ids[0] if ids else None
     return (uname, pid)
 
-# Build a Discord view with link buttons for each winner's product
-def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
-    buttons = []
-    for uid in user_ids:
-        uname, pid = giveaway_entry_username_and_pid(gid, uid)
-        if not pid:
-            continue
-        label = f"Gift for {uname or 'winner'}"
-        url = f"https://www.imvu.com/shop/product/{pid}"
-        buttons.append((label, url))
-    if not buttons:
-        return None
+async def build_gift_view(gid: int, user_ids: List[int]) -> Optional[ui.View]:
+    """
+    One Link Button per winner that opens their IMVU *profile* page.
+    """
     v = ui.View(timeout=None)
-    # Discord allows up to 25 buttons per message (5 rows x 5); you'll likely be far below that.
-    for label, url in buttons[:25]:
-        v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label[:80], url=url))
-    return v
+    added = 0
+    for uid in user_ids:
+        uname, _pid = giveaway_entry_username_and_pid(gid, uid)
+        if not uname:
+            continue
+        url = imvu_profile_link(uname)
+        label = f"Gift for {(uname or 'winner').strip().title()}"[:80]
+        v.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
+        added += 1
+        if added >= 25:
+            break
+    return v if added else None
+
     
 def imvu_wishlist_link(username: str) -> str:
     """Return a wishlist URL that actually works on IMVU."""
