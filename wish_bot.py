@@ -439,6 +439,55 @@ async def fetch_creator_name(mid: str) -> Optional[str]:
 def shop_masked_link(cid: str, label: Optional[str]) -> str:
     url = f"https://www.imvu.com/shop/web_search.php?manufacturers_id={cid}"
     return f"[{label or cid}]({url})"
+    
+# --- helpers used by per-shop draw ---
+SHOP_LINK_RX = re.compile(r'manufacturers_id=(\d+)')
+
+async def get_giveaway_shops(gid: int) -> List[str]:
+    """Read the giveaway message embed and extract manufacturers_id values."""
+    with db() as conn:
+        row = conn.execute("SELECT channel_id, message_id FROM giveaways WHERE id=?", (gid,)).fetchone()
+    if not row or not row[0] or not row[1]:
+        return []
+    ch_id, msg_id = int(row[0]), int(row[1])
+
+    channel = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+    try:
+        msg = await channel.fetch_message(msg_id)
+    except Exception:
+        return []
+
+    if not msg.embeds:
+        return []
+
+    desc = (msg.embeds[0].description or "")
+    ids = SHOP_LINK_RX.findall(desc)
+    # fallback: if someone pasted bare CIDs in text
+    if not ids:
+        ids = re.findall(r'\b(\d{5,})\b', desc)
+    # uniq, keep order
+    return list(dict.fromkeys(ids))
+
+def giveaway_entry_raw_products(gid: int, uid: int) -> List[str]:
+    """Return all product IDs the user submitted for this giveaway (parsed from the stored text)."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT wishlist_product_id FROM giveaway_entries "
+            "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+            (gid, str(uid))
+        ).fetchone()
+    if not row or not row[0]:
+        return []
+    return parse_product_ids(str(row[0]), limit=10)
+
+async def find_pid_for_shop(session: aiohttp.ClientSession, sem: asyncio.Semaphore,
+                            pid_list: List[str], shop_cid: str) -> Optional[str]:
+    """Pick the first PID from pid_list that belongs to the given manufacturer (shop_cid)."""
+    for pid in pid_list:
+        cid = await product_creator_id(session, pid, sem)
+        if cid == str(shop_cid):
+            return pid
+    return None
 
 # =========================
 # Entrant UI — button + modal
@@ -837,7 +886,7 @@ async def giveaway_watcher():
         pool = list(entries)
         random.shuffle(pool)
         
-        shops = get_giveaway_shops(gid)
+        shops = await get_giveaway_shops(gid)
         sem = asyncio.Semaphore(PRODUCT_CONCURRENCY)
         
         async with aiohttp.ClientSession(
