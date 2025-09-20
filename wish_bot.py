@@ -705,7 +705,7 @@ async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: 
                 ).fetchone() or [None])[0]
             ]
         if not pool:
-            return await interaction.response_send_message(
+            return await interaction.response.send_message(
                 "No eligible entrants left to reroll (lifetime one-win is enabled).",
                 ephemeral=True
             )
@@ -817,96 +817,106 @@ async def giveaway_watcher():
     now = datetime.now(timezone.utc)
     with db() as conn:
         cur = conn.execute(
-            "SELECT id, channel_id, message_id, winners, prize, description FROM giveaways "
-            "WHERE status='OPEN' AND end_at <= ?",
+            # FIX: match unpack count (5)
+            "SELECT id, channel_id, message_id, winners, prize "
+            "FROM giveaways WHERE status='OPEN' AND end_at <= ?",
             (now.isoformat(),)
         )
-
         due = cur.fetchall()
     if not due:
         return
 
     for gid, ch_id, msg_id, winners, prize in due:
         try:
-            # claim so only one loop/worker processes it
+            # claim so only one worker handles this giveaway
             if not giveaway_claim(gid):
                 continue
-    
-            # --- safely get the channel (cache OR API) ---
+
+            # get channel (cache first, then API)
             channel = bot.get_channel(int(ch_id))
             if channel is None:
-                try:
-                    channel = await bot.fetch_channel(int(ch_id))
-                except Exception as e:
-                    print(f"[wish] fetch_channel failed for ch {ch_id}: {e}")
-                    # unlock so the watcher retries next tick
-                    with db() as conn:
-                        conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
-                    continue
-    
-            # ----- your existing code begins (disable button, build picks, etc.) -----
-            # (leave everything you already have here unchanged)
-            # ... disable button
-            # ... per-shop selection -> builds `picks`
-            # ... build text + view
-            # ... send message into channel -> sets `posted` True/False
-            # ----- your existing code ends -----
-    
-            if posted:
-                for uid, _pid in picks:
-                    set_winner(uid)
-                    add_giveaway_winner(gid, uid)
-                giveaway_mark_done(gid)
-            else:
-                with db() as conn:
-                    conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
-        except Exception as e:
-            # any unexpected error: log and unlock so it can retry
-            print(f"[wish] fatal draw error gid {gid}: {e}")
-            with db() as conn:
-                conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))    
+                channel = await bot.fetch_channel(int(ch_id))
 
+            # disable the Enter button on the original message (best effort)
+            try:
+                if int(msg_id):
+                    msg = await channel.fetch_message(int(msg_id))
+                    await msg.edit(view=EnterButton(gid, disabled=True))
+            except Exception:
+                pass
 
-        # disable enter button
-        try:
-            if int(msg_id):
-                msg = await channel.fetch_message(int(msg_id))
-                await msg.edit(view=EnterButton(gid, disabled=True))
-        except Exception:
-            pass
+            # -------- pick winners (one per shop if shops were supplied) --------
+            entries = giveaway_entry_user_ids(gid)
+            winners_n = max(1, int(winners))
 
-        # --- Per-shop draw ---
-        entries = giveaway_entry_user_ids(gid)
-        winners_n = max(1, int(winners))
-        
-        # NOTE: picks now stores (uid, matched_pid_for_that_shop | None)
-        picks: List[Tuple[int, Optional[str]]] = []
-        picked_users: set[int] = set()
-        
-        pool = list(entries)
-        random.shuffle(pool)
-        
-        shops = await get_giveaway_shops(gid)
-        sem = asyncio.Semaphore(PRODUCT_CONCURRENCY)
-        
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=25, connect=10),
-            headers=DEFAULT_HEADERS
-        ) as session:
-            if shops:
-                # One winner per shop (if possible)
-                for shop_cid in shops:
-                    # Build candidates respecting lifetime/cooldown and not already picked
-                    candidates: List[int] = []
-                    with db() as conn:
-                        for uid in pool:
-                            if uid in picked_users:
+            picks: List[Tuple[int, Optional[str]]] = []   # (uid, matched_pid)
+            picked_users: set[int] = set()
+            pool = list(entries)
+            random.shuffle(pool)
+
+            shops = await get_giveaway_shops(gid)
+            sem = asyncio.Semaphore(PRODUCT_CONCURRENCY)
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=25, connect=10),
+                headers=DEFAULT_HEADERS
+            ) as session:
+                if shops:
+                    # try to award one unique user per shop
+                    for shop_cid in shops:
+                        # build eligible candidates (respect ONE_WIN_ONLY / cooldown)
+                        candidates: List[int] = []
+                        with db() as conn:
+                            for uid in pool:
+                                if uid in picked_users:
+                                    continue
+                                row = conn.execute(
+                                    "SELECT last_win_at FROM Participants WHERE discord_id=?",
+                                    (str(uid),)
+                                ).fetchone()
+
+                                if ONE_WIN_ONLY:
+                                    if row and row[0]:
+                                        continue
+                                elif WIN_COOLDOWN_DAYS > 0 and row and row[0]:
+                                    try:
+                                        lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
+                                    except Exception:
+                                        lw = datetime.now(timezone.utc) - timedelta(days=9999)
+                                    if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
+                                        continue
+
+                                candidates.append(uid)
+
+                        random.shuffle(candidates)
+
+                        chosen: Optional[Tuple[int, Optional[str]]] = None
+                        for uid in candidates:
+                            pid_list = giveaway_entry_raw_products(gid, uid)
+                            if not pid_list:
                                 continue
+                            match_pid = await find_pid_for_shop(session, sem, pid_list, shop_cid)
+                            if match_pid:
+                                chosen = (uid, match_pid)
+                                break
+
+                        if chosen:
+                            picks.append(chosen)
+                            picked_users.add(chosen[0])
+                            if len(picks) >= winners_n:
+                                break
+
+                # Fallback fill if we didn’t reach winners_n
+                if len(picks) < winners_n and pool:
+                    with db() as conn:
+                        remaining = [u for u in pool if u not in picked_users]
+                        random.shuffle(remaining)
+                        for uid in remaining:
                             row = conn.execute(
                                 "SELECT last_win_at FROM Participants WHERE discord_id=?",
                                 (str(uid),)
                             ).fetchone()
-        
+
                             if ONE_WIN_ONLY:
                                 if row and row[0]:
                                     continue
@@ -917,94 +927,72 @@ async def giveaway_watcher():
                                     lw = datetime.now(timezone.utc) - timedelta(days=9999)
                                 if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
                                     continue
-        
-                            candidates.append(uid)
-        
-                    random.shuffle(candidates)
-        
-                    chosen: Optional[Tuple[int, Optional[str]]] = None
-                    for uid in candidates:
-                        pid_list = giveaway_entry_raw_products(gid, uid)
-                        if not pid_list:
-                            continue
-                        # find a product from this user's list that belongs to the current shop
-                        match_pid = await find_pid_for_shop(session, sem, pid_list, shop_cid)
-                        if match_pid:
-                            chosen = (uid, match_pid)
-                            break
-        
-                    if chosen:
-                        picks.append(chosen)
-                        picked_users.add(chosen[0])
-                        if len(picks) >= winners_n:
-                            break
-        
-            # Fallback fill if we didn't reach winners_n
-            if len(picks) < winners_n and pool:
-                with db() as conn:
-                    remaining = [u for u in pool if u not in picked_users]
-                    random.shuffle(remaining)
-                    for uid in remaining:
-                        row = conn.execute(
-                            "SELECT last_win_at FROM Participants WHERE discord_id=?",
-                            (str(uid),)
-                        ).fetchone()
-        
-                        if ONE_WIN_ONLY:
-                            if row and row[0]:
-                                continue
-                        elif WIN_COOLDOWN_DAYS > 0 and row and row[0]:
-                            try:
-                                lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
-                            except Exception:
-                                lw = datetime.now(timezone.utc) - timedelta(days=9999)
-                            if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
-                                continue
-        
-                        pid_list = giveaway_entry_raw_products(gid, uid)
-                        picks.append((uid, pid_list[0] if pid_list else None))
-                        if len(picks) >= winners_n:
-                            break
 
+                            pid_list = giveaway_entry_raw_products(gid, uid)
+                            picks.append((uid, pid_list[0] if pid_list else None))
+                            if len(picks) >= winners_n:
+                                break
 
-        text = (
-            f"**WISH Giveaway Ended**\n\n"
-            f"**Prize:** {format_prize_text(prize)}\n\n"
-            f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
-        )
+            # -------- build announcement text (FIX: define mention_line) --------
+            if not pool:
+                mention_line = "No entries 😔"
+            elif not picks:
+                mention_line = "No eligible Participants 😔"
+            else:
+                lines = []
+                for uid, pid in picks:
+                    if pid:
+                        url = imvu_product_link(pid)
+                        lines.append(f"• <@{uid}> — <{url}>")
+                    else:
+                        lines.append(f"• <@{uid}>")
+                mention_line = "\n".join(lines)
 
-        # Profile buttons (one per winner)
-        view = ui.View(timeout=None)
-        for uid, _pid in picks:
-            with db() as conn:
-                rowu = conn.execute(
-                    "SELECT imvu_username FROM giveaway_entries "
-                    "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
-                    (gid, str(uid))
-                ).fetchone()
-            if not rowu or not rowu[0]:
-                continue
-            uname = (rowu[0] or "").strip()
-            url = imvu_profile_link(uname)
-            label = f"Gift {uname}"[:80]
-            view.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
-        view_to_send = view if len(view.children) > 0 else None
+            text = (
+                "🎉 **WISH Giveaway Ended**\n"
+                f"**Prize:** {format_prize_text(prize)}\n"
+                f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
+            )
 
-        posted = False
-        try:
-            await channel.send(text, view=view_to_send)
-            posted = True
-        except Exception as e:
-            print(f"[wish] send failed for gid {gid} in ch {ch_id}: {e}")
-
-        if posted:
+            # profile buttons (one per winner, opens IMVU profile)
+            view = ui.View(timeout=None)
             for uid, _pid in picks:
-                set_winner(uid)
-                add_giveaway_winner(gid, uid)
-            giveaway_mark_done(gid)
-        else:
+                with db() as conn:
+                    rowu = conn.execute(
+                        "SELECT imvu_username FROM giveaway_entries "
+                        "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+                        (gid, str(uid))
+                    ).fetchone()
+                if not rowu or not rowu[0]:
+                    continue
+                uname = (rowu[0] or "").strip()
+                url = imvu_profile_link(uname)
+                label = f"Gift {uname}"[:80]
+                view.add_item(ui.Button(style=discord.ButtonStyle.link, label=label, url=url))
+            view_to_send = view if len(view.children) > 0 else None
+
+            posted = False
+            try:
+                await channel.send(text, view=view_to_send)
+                posted = True
+            except Exception as e:
+                print(f"[wish] send failed for gid {gid} in ch {ch_id}: {e}")
+
+            if posted:
+                for uid, _pid in picks:
+                    set_winner(uid)
+                    add_giveaway_winner(gid, uid)
+                giveaway_mark_done(gid)
+            else:
+                with db() as conn:
+                    conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
+
+        except Exception as e:
+            # any unexpected error: log and unlock so the watcher can retry next tick
+            print(f"[wish] fatal draw error gid {gid}: {e}")
             with db() as conn:
                 conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
+
 
 # =========================
 # Optional: Product image helper (unused by default)
