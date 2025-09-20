@@ -949,8 +949,8 @@ async def giveaway_watcher():
                 mention_line = "\n".join(lines)
 
             text = (
-                "🎉 **WISH Giveaway Ended**\n"
-                f"**Prize:** {format_prize_text(prize)}\n"
+                "🎉 **WISH Giveaway Ended**\n\n"
+                f"**Prize:** {format_prize_text(prize)}\n\n"
                 f"**Winner{'s' if winners_n != 1 else ''}:**\n{mention_line}"
             )
 
