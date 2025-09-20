@@ -580,12 +580,15 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
 
         # winners = number of unique shops; else what was typed
         winners_n = len(unique_ids) if unique_ids else winners_typed
+        
+        desc_meta = json.dumps({"shops": unique_ids})
 
         end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
         # no announcement text anymore -> pass "" to description
         gid = giveaway_insert(
-            interaction.channel.id, prize, "", winners_n, end_at_utc.isoformat(), interaction.user.id
+            interaction.channel.id, prize, desc_meta, winners_n, end_at_utc.isoformat(), interaction.user.id
         )
+
         # save shops for this giveaway (used by per-shop draw)
         set_giveaway_shops(gid, unique_ids)
 
@@ -598,7 +601,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
             f"**Prize:** {format_prize_text(prize)}\n"
             f"**Winners:** {winners_n}\n"
             f"**Ends:** {end_rel}\n\n"
-            f"**Today we support Shops:** {creators_txt}\n\n"
+            f"**This round we support Shops:** {creators_txt}\n\n"
             f"Hit **Enter Giveaway** button, drop your **IMVU username**, and follow steps\n"
             f"or you're just window shopping."
         )
@@ -736,6 +739,18 @@ async def find_pid_for_shop(session: aiohttp.ClientSession, sem: asyncio.Semapho
         if cid and str(cid) == str(shop_cid):
             return pid
     return None
+                                
+def giveaway_entries_with_pid(gid: int) -> List[Tuple[int, Optional[str]]]:
+    with db() as conn:
+        cur = conn.execute(
+            "SELECT discord_id, wishlist_product_id FROM giveaway_entries WHERE giveaway_id=?",
+            (gid,)
+        )
+        rows = []
+        for uid, raw in cur.fetchall():
+            pid = parse_product_ids(str(raw or ""), limit=1)
+            rows.append((int(uid), pid[0] if pid else None))
+    return rows
 
 # =========================
 # Draw/close watcher (one winner per shop if shops were supplied)
@@ -753,8 +768,11 @@ async def giveaway_watcher():
     now = datetime.now(timezone.utc)
     with db() as conn:
         cur = conn.execute(
-            "SELECT id, channel_id, message_id, winners, prize FROM giveaways "
-            "WHERE status='OPEN' AND end_at <= ?", (now.isoformat(),))
+            "SELECT id, channel_id, message_id, winners, prize, description FROM giveaways "
+            "WHERE status='OPEN' AND end_at <= ?",
+            (now.isoformat(),)
+        )
+
         due = cur.fetchall()
     if not due:
         return
@@ -784,98 +802,94 @@ async def giveaway_watcher():
         # --- Per-shop draw ---
         entries = giveaway_entry_user_ids(gid)
         winners_n = max(1, int(winners))
-        picks: List[Tuple[int, Optional[str]]] = []  # (uid, matched_pid)
+        
+        # NOTE: picks now stores (uid, matched_pid_for_that_shop | None)
+        picks: List[Tuple[int, Optional[str]]] = []
         picked_users: set[int] = set()
+        
         pool = list(entries)
         random.shuffle(pool)
-
+        
         shops = get_giveaway_shops(gid)
         sem = asyncio.Semaphore(PRODUCT_CONCURRENCY)
-
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25, connect=10),
-                                         headers=DEFAULT_HEADERS) as session:
+        
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=25, connect=10),
+            headers=DEFAULT_HEADERS
+        ) as session:
             if shops:
+                # One winner per shop (if possible)
                 for shop_cid in shops:
-                    # candidate list respecting lifetime/cooldown
+                    # Build candidates respecting lifetime/cooldown and not already picked
                     candidates: List[int] = []
                     with db() as conn:
                         for uid in pool:
                             if uid in picked_users:
                                 continue
-                            row = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?",
-                                               (str(uid),)).fetchone()
+                            row = conn.execute(
+                                "SELECT last_win_at FROM Participants WHERE discord_id=?",
+                                (str(uid),)
+                            ).fetchone()
+        
                             if ONE_WIN_ONLY:
                                 if row and row[0]:
                                     continue
-                                candidates.append(uid)
-                            else:
-                                if not row or not row[0]:
-                                    candidates.append(uid)
-                                else:
-                                    try:
-                                        lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
-                                    except Exception:
-                                        lw = datetime.now(timezone.utc) - timedelta(days=9999)
-                                    if lw <= datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
-                                        candidates.append(uid)
-                    random.shuffle(candidates)
-
-                    chosen: Optional[Tuple[int, Optional[str]]] = None
-                    for uid in candidates:
-                        pid_list = giveaway_entry_raw_products(gid, uid)
-                        if not pid_list:
-                            continue
-                        match_pid = await find_pid_for_shop(session, sem, pid_list, shop_cid)
-                        if match_pid:
-                            chosen = (uid, match_pid)
-                            break
-
-                    if chosen:
-                        picks.append(chosen)
-                        picked_users.add(chosen[0])
-                        if len(picks) >= winners_n:
-                            break
-
-            # Fallback fill
-            if len(picks) < winners_n and pool:
-                with db() as conn:
-                    remaining = [u for u in pool if u not in picked_users]
-                    random.shuffle(remaining)
-                    for uid in remaining:
-                        if ONE_WIN_ONLY:
-                            row = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?",
-                                               (str(uid),)).fetchone()
-                            if row and row[0]:
-                                continue
-                        elif WIN_COOLDOWN_DAYS > 0:
-                            row = conn.execute("SELECT last_win_at FROM Participants WHERE discord_id=?",
-                                               (str(uid),)).fetchone()
-                            if row and row[0]:
+                            elif WIN_COOLDOWN_DAYS > 0 and row and row[0]:
                                 try:
                                     lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
                                 except Exception:
                                     lw = datetime.now(timezone.utc) - timedelta(days=9999)
                                 if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
                                     continue
+        
+                            candidates.append(uid)
+        
+                    random.shuffle(candidates)
+        
+                    chosen: Optional[Tuple[int, Optional[str]]] = None
+                    for uid in candidates:
+                        pid_list = giveaway_entry_raw_products(gid, uid)
+                        if not pid_list:
+                            continue
+                        # find a product from this user's list that belongs to the current shop
+                        match_pid = await find_pid_for_shop(session, sem, pid_list, shop_cid)
+                        if match_pid:
+                            chosen = (uid, match_pid)
+                            break
+        
+                    if chosen:
+                        picks.append(chosen)
+                        picked_users.add(chosen[0])
+                        if len(picks) >= winners_n:
+                            break
+        
+            # Fallback fill if we didn't reach winners_n
+            if len(picks) < winners_n and pool:
+                with db() as conn:
+                    remaining = [u for u in pool if u not in picked_users]
+                    random.shuffle(remaining)
+                    for uid in remaining:
+                        row = conn.execute(
+                            "SELECT last_win_at FROM Participants WHERE discord_id=?",
+                            (str(uid),)
+                        ).fetchone()
+        
+                        if ONE_WIN_ONLY:
+                            if row and row[0]:
+                                continue
+                        elif WIN_COOLDOWN_DAYS > 0 and row and row[0]:
+                            try:
+                                lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
+                            except Exception:
+                                lw = datetime.now(timezone.utc) - timedelta(days=9999)
+                            if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
+                                continue
+        
                         pid_list = giveaway_entry_raw_products(gid, uid)
                         picks.append((uid, pid_list[0] if pid_list else None))
                         if len(picks) >= winners_n:
                             break
 
-        # Build announcement
-        if not pool:
-            mention_line = "No entries 😔"
-        elif not picks:
-            mention_line = "No eligible Participants 😔"
-        else:
-            rows = []
-            for uid, pid in picks:
-                if pid:
-                    url = imvu_product_link(pid)
-                    rows.append(f"• <@{uid}> — <{url}>")
-                else:
-                    rows.append(f"• <@{uid}>")
-            mention_line = "\n".join(rows)
 
         text = (
             f"**WISH Giveaway Ended**\n\n"
