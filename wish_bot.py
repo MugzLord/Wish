@@ -778,18 +778,45 @@ async def giveaway_watcher():
         return
 
     for gid, ch_id, msg_id, winners, prize in due:
-        if not giveaway_claim(gid):
-            continue
-
-        channel = bot.get_channel(int(ch_id))
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(int(ch_id))
-            except Exception as e:
-                print(f"[wish] fetch_channel failed for ch {ch_id}: {e}")
+        try:
+            # claim so only one loop/worker processes it
+            if not giveaway_claim(gid):
+                continue
+    
+            # --- safely get the channel (cache OR API) ---
+            channel = bot.get_channel(int(ch_id))
+            if channel is None:
+                try:
+                    channel = await bot.fetch_channel(int(ch_id))
+                except Exception as e:
+                    print(f"[wish] fetch_channel failed for ch {ch_id}: {e}")
+                    # unlock so the watcher retries next tick
+                    with db() as conn:
+                        conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
+                    continue
+    
+            # ----- your existing code begins (disable button, build picks, etc.) -----
+            # (leave everything you already have here unchanged)
+            # ... disable button
+            # ... per-shop selection -> builds `picks`
+            # ... build text + view
+            # ... send message into channel -> sets `posted` True/False
+            # ----- your existing code ends -----
+    
+            if posted:
+                for uid, _pid in picks:
+                    set_winner(uid)
+                    add_giveaway_winner(gid, uid)
+                giveaway_mark_done(gid)
+            else:
                 with db() as conn:
                     conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))
-                continue
+        except Exception as e:
+            # any unexpected error: log and unlock so it can retry
+            print(f"[wish] fatal draw error gid {gid}: {e}")
+            with db() as conn:
+                conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=? AND status='DRAWING'", (gid,))    
+
 
         # disable enter button
         try:
@@ -981,6 +1008,11 @@ async def sync_cmd(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     init_db()
+
+    # 🔧 fail-safe: if a previous draw crashed, unlock it so the watcher can retry
+    with db() as conn:
+        conn.execute("UPDATE giveaways SET status='OPEN' WHERE status='DRAWING'")
+
     try:
         await tree.sync(guild=None)
         for g in bot.guilds:
