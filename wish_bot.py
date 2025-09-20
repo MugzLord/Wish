@@ -656,7 +656,7 @@ class WishSingle(ui.Modal, title="Create WISH Giveaway"):
         )
 
         embed = discord.Embed(title="⚡ WISH — Giveaway", description=desc, color=discord.Color.gold())
-        embed.set_footer(text="👉 WL missing? You’re done. One per shop, non-negotiable. 😂")
+        embed.set_footer(text="👉 WL missing? You’re done. One per shop, non-negotiable.😎")
         embed.add_field(name="Participants", value="0", inline=True)
 
         try:
