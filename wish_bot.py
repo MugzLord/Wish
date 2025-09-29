@@ -177,6 +177,45 @@ def get_giveaway_shops(gid: int) -> List[str]:
     r = get_rules().get(f"shops:{gid}", "")
     return [x for x in r.split(",") if x]
 
+# ---- New: explicit helpers to avoid name collision & prefer rules ----
+def get_giveaway_shops_from_rules(gid: int) -> List[str]:
+    r = get_rules().get(f"shops:{gid}", "")
+    return [x for x in r.split(",") if x]
+
+SHOP_LINK_RX = re.compile(r'manufacturers_id=(\d+)')
+
+async def get_giveaway_shops_from_embed(gid: int) -> List[str]:
+    """Read the giveaway message embed and extract manufacturers_id values."""
+    with db() as conn:
+        row = conn.execute("SELECT channel_id, message_id FROM giveaways WHERE id=?", (gid,)).fetchone()
+    if not row or not row[0] or not row[1]:
+        return []
+    ch_id, msg_id = int(row[0]), int(row[1])
+
+    channel = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+    try:
+        msg = await channel.fetch_message(msg_id)
+    except Exception:
+        return []
+
+    if not msg.embeds:
+        return []
+
+    desc = (msg.embeds[0].description or "")
+    ids = SHOP_LINK_RX.findall(desc)
+    # fallback: if someone pasted bare CIDs in text
+    if not ids:
+        ids = re.findall(r'\b(\d{5,})\b', desc)
+    # uniq, keep order
+    return list(dict.fromkeys(ids))
+
+async def resolve_giveaway_shops(gid: int) -> List[str]:
+    """Prefer shops from rules (what admin set); fallback to scraping the embed."""
+    ids = get_giveaway_shops_from_rules(gid)
+    if ids:
+        return ids
+    return await get_giveaway_shops_from_embed(gid)
+
 def giveaway_add_entry(gid: int, discord_id: int, uname: str, pid: str):
     with db() as conn:
         conn.execute("""
@@ -443,7 +482,7 @@ def shop_masked_link(cid: str, label: Optional[str]) -> str:
 # --- helpers used by per-shop draw ---
 SHOP_LINK_RX = re.compile(r'manufacturers_id=(\d+)')
 
-async def get_giveaway_shops(gid: int) -> List[str]:
+async def get_giveaway_shops_from_embed(gid: int) -> List[str]:
     """Read the giveaway message embed and extract manufacturers_id values."""
     with db() as conn:
         row = conn.execute("SELECT channel_id, message_id FROM giveaways WHERE id=?", (gid,)).fetchone()
@@ -514,22 +553,58 @@ class EnterModal(ui.Modal, title="⚡ WISH — Enter Giveaway"):
             return await interaction.response.send_message(
                 "Enter a valid **IMVU username** and at least **one** product ID/link.", ephemeral=True
             )
-
-        # one entry per user per giveaway
+        # one entry per user per giveaway — allow edits instead of blocking
         with db() as conn:
-            cur = conn.execute("SELECT 1 FROM giveaway_entries WHERE giveaway_id=? AND discord_id=?",
-                               (gid, str(interaction.user.id)))
-            if cur.fetchone():
-                return await interaction.response.send_message("You’ve already entered this giveaway ✅", ephemeral=True)
+            cur = conn.execute(
+                "SELECT 1 FROM giveaway_entries WHERE giveaway_id=? AND discord_id=?",
+                (gid, str(interaction.user.id))
+            )
+            exists = cur.fetchone() is not None
 
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         # Trust entrant input; store ALL submitted IDs (comma-joined)
         all_ids_csv = ",".join(ids)
-        try:
-            giveaway_add_entry(gid, interaction.user.id, uname, all_ids_csv)
-        except sqlite3.IntegrityError:
-            return await interaction.followup.send("You’re already entered ✅", ephemeral=True)
+
+        if exists:
+            # UPDATE existing record (edit entry)
+            with db() as conn:
+                conn.execute(
+                    "UPDATE giveaway_entries "
+                    "SET imvu_username=?, wishlist_product_id=?, created_at=datetime('now') "
+                    "WHERE giveaway_id=? AND discord_id=?",
+                    (uname, all_ids_csv, gid, str(interaction.user.id))
+                )
+            # ensure participant row exists/refresh
+            upsert_entrant(interaction.user.id, uname, total_items=0, eligible=1)
+
+            await update_giveaway_counter_embed(gid)
+            return await interaction.followup.send(
+                f"✏️ Updated your entry as **{uname}** (saved **{len(ids)}** product ID(s)).",
+                ephemeral=True
+            )
+        else:
+            # NEW entry
+            try:
+                giveaway_add_entry(gid, interaction.user.id, uname, all_ids_csv)
+            except sqlite3.IntegrityError:
+                # rare race: fallback to update
+                with db() as conn:
+                    conn.execute(
+                        "UPDATE giveaway_entries "
+                        "SET imvu_username=?, wishlist_product_id=?, created_at=datetime('now') "
+                        "WHERE giveaway_id=? AND discord_id=?",
+                        (uname, all_ids_csv, gid, str(interaction.user.id))
+                    )
+
+            upsert_entrant(interaction.user.id, uname, total_items=0, eligible=1)
+
+            await update_giveaway_counter_embed(gid)
+            return await interaction.followup.send(
+                f"✅ Entered as **{uname}** (saved **{len(ids)}** product ID(s)).",
+                ephemeral=True
+            )
+
 
         # ensure participant row exists so cooldown / lifetime rules work
         upsert_entrant(interaction.user.id, uname, total_items=0, eligible=1)
@@ -773,8 +848,7 @@ def giveaway_entry_product_id(gid: int, discord_id: int) -> Optional[str]:
 def giveaway_entry_raw_products(gid: int, discord_id: int) -> List[str]:
     with db() as conn:
         row = conn.execute(
-            "SELECT wishlist_product_id FROM giveaway_entries "
-            "WHERE giveaway_id=? AND discord_id=? LIMIT 1",
+            "SELECT wishlist_product_id FROM giveaway_entries WHERE giveaway_id=? AND discord_id=? LIMIT 1",
             (gid, str(discord_id))
         ).fetchone()
     if not row or not row[0]:
@@ -854,7 +928,8 @@ async def giveaway_watcher():
             pool = list(entries)
             random.shuffle(pool)
 
-            shops = await get_giveaway_shops(gid)
+            # CHANGED: resolve shops preferring rules, fallback to embed
+            shops = await resolve_giveaway_shops(gid)
             sem = asyncio.Semaphore(PRODUCT_CONCURRENCY)
 
             async with aiohttp.ClientSession(
