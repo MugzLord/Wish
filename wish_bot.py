@@ -25,6 +25,7 @@ PRODUCT_SAMPLE_LIMIT = int(os.getenv("PRODUCT_SAMPLE_LIMIT", "60"))
 PRODUCT_CONCURRENCY = int(os.getenv("PRODUCT_CONCURRENCY", "4"))
 PRODUCT_CACHE_TTL_HOURS = int(os.getenv("PRODUCT_CACHE_TTL_HOURS", "168"))
 ONE_WIN_ONLY = os.getenv("ONE_WIN_ONLY", "1") == "1"  # 1 = lifetime one win; set to 0 to disable
+STRICT_SHOP_MATCH = os.getenv("STRICT_SHOP_MATCH", "0") == "1"  # 1 = no fallback when shops exist
 
 try:
     from zoneinfo import ZoneInfo
@@ -993,31 +994,36 @@ async def giveaway_watcher():
                                 break
 
                 # Fallback fill if we didn’t reach winners_n
+                # Fallback fill if we didn’t reach winners_n
                 if len(picks) < winners_n and pool:
-                    with db() as conn:
-                        remaining = [u for u in pool if u not in picked_users]
-                        random.shuffle(remaining)
-                        for uid in remaining:
-                            row = conn.execute(
-                                "SELECT last_win_at FROM Participants WHERE discord_id=?",
-                                (str(uid),)
-                            ).fetchone()
-
-                            if ONE_WIN_ONLY:
-                                if row and row[0]:
-                                    continue
-                            elif WIN_COOLDOWN_DAYS > 0 and row and row[0]:
-                                try:
-                                    lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
-                                except Exception:
-                                    lw = datetime.now(timezone.utc) - timedelta(days=9999)
-                                if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
-                                    continue
-
-                            pid_list = giveaway_entry_raw_products(gid, uid)
-                            picks.append((uid, pid_list[0] if pid_list else None))
-                            if len(picks) >= winners_n:
-                                break
+                    # If shops exist AND strict mode is on, do NOT fallback — keep only shop-matched winners
+                    if shops and STRICT_SHOP_MATCH:
+                        pass  # no fallback; winners remain as matched (possibly zero)
+                    else:
+                        with db() as conn:
+                            remaining = [u for u in pool if u not in picked_users]
+                            random.shuffle(remaining)
+                            for uid in remaining:
+                                row = conn.execute(
+                                    "SELECT last_win_at FROM Participants WHERE discord_id=?",
+                                    (str(uid),)
+                                ).fetchone()
+                
+                                if ONE_WIN_ONLY:
+                                    if row and row[0]:
+                                        continue
+                                elif WIN_COOLDOWN_DAYS > 0 and row and row[0]:
+                                    try:
+                                        lw = datetime.fromisoformat(row[0].replace("Z","")).replace(tzinfo=timezone.utc)
+                                    except Exception:
+                                        lw = datetime.now(timezone.utc) - timedelta(days=9999)
+                                    if lw > datetime.now(timezone.utc) - timedelta(days=WIN_COOLDOWN_DAYS):
+                                        continue
+                
+                                pid_list = giveaway_entry_raw_products(gid, uid)
+                                picks.append((uid, pid_list[0] if pid_list else None))
+                                if len(picks) >= winners_n:
+                                    break
 
             # -------- build announcement text (FIX: define mention_line) --------
             if not pool:
