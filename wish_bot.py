@@ -250,6 +250,10 @@ def imvu_profile_link(username: str) -> str:
     u = (username or "").strip()
     u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", u)
     return f"https://www.imvu.com/next/av/{u_safe}/"
+    
+def purge_bad_cache_rows():
+    with db() as conn:
+        conn.execute("DELETE FROM cache_products WHERE creator_id='' OR creator_id IS NULL;")
 
 # =========================
 # Scraping & eligibility (kept; not used for entry check)
@@ -307,8 +311,10 @@ def _extract_wishlist_links_from_profile(html: str) -> List[str]:
 
 async def product_creator_id(session: aiohttp.ClientSession, product_id: str, sem: asyncio.Semaphore) -> Optional[str]:
     cached = cache_get(product_id)
-    if cached is not None:
-        return cached or None
+    # If cache has a real creator_id, use it. If it's "", treat as a miss and retry.
+    if cached is not None and cached != "":
+        return cached
+
     urls = [
         f"https://www.imvu.com/shop/product/{product_id}",
         f"https://www.imvu.com/shop/product.php?products_id={product_id}",
@@ -316,14 +322,16 @@ async def product_creator_id(session: aiohttp.ClientSession, product_id: str, se
     async with sem:
         for url in urls:
             htmlp = await _fetch_html(url, session)
-            if not htmlp: continue
+            if not htmlp:
+                continue
             m = MANUFACTURER_RX.search(htmlp)
             if m:
                 cid = m.group(1)
-                cache_put(product_id, cid)
+                cache_put(product_id, cid)   # cache only on success
                 return cid
-    cache_put(product_id, None)
+    # do NOT cache failures
     return None
+
 
 def cache_get(product_id: str) -> Optional[str]:
     with db() as conn:
@@ -340,11 +348,14 @@ def cache_get(product_id: str) -> Optional[str]:
     return creator_id
 
 def cache_put(product_id: str, creator_id: Optional[str]):
+    # Skip caching failures/empties
+    if not creator_id:
+        return
     with db() as conn:
         conn.execute(
             "INSERT INTO cache_products(product_id,creator_id,fetched_at) VALUES(?,?,?) "
             "ON CONFLICT(product_id) DO UPDATE SET creator_id=excluded.creator_id, fetched_at=excluded.fetched_at;",
-            (product_id, creator_id or "", datetime.now(timezone.utc).isoformat())
+            (product_id, creator_id, datetime.now(timezone.utc).isoformat())
         )
 
 async def evaluate_user(username: str):
@@ -1120,6 +1131,7 @@ async def sync_cmd(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     init_db()
+    purge_bad_cache_rows()  # <-- add this line
 
     # 🔧 fail-safe: if a previous draw crashed, unlock it so the watcher can retry
     with db() as conn:
