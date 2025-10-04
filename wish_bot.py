@@ -108,6 +108,18 @@ def init_db():
         for k, v in [("mode","NONE"), ("threshold","10"), ("min_total","10"), ("map_json","{}")]:
             conn.execute("INSERT OR IGNORE INTO rules(key,value) VALUES(?,?)", (k, v))
 
+DB_INITIALISED = False
+
+def ensure_db():
+    """Idempotent DB bootstrap so interactions never hit 'no such table'."""
+    global DB_INITIALISED
+    if DB_INITIALISED:
+        return
+    init_db()
+    purge_bad_cache_rows()
+    DB_INITIALISED = True
+
+
 def set_rule(key: str, value: str):
     with db() as conn:
         conn.execute(
@@ -1220,7 +1232,8 @@ async def rebind_cmd(interaction: discord.Interaction, giveaway_id: int):
 # =========================
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    # Only handle button clicks; ignore everything else
+    ensure_db()  # <<< make sure tables exist before any DB query
+
     if interaction.type != discord.InteractionType.component:
         return
 
@@ -1229,24 +1242,20 @@ async def on_interaction(interaction: discord.Interaction):
         return
 
     try:
-        # New buttons (after your change): wish:enter:<gid>
         if cid.startswith("wish:enter:"):
             gid = int(cid.split(":")[-1])
-            await interaction.response.send_modal(EnterModal(gid))
-            return
+            return await interaction.response.send_modal(EnterModal(gid))
 
-        # Legacy buttons on the old message: wish:enter_btn
         if cid == "wish:enter_btn":
-            # Map message -> giveaway id from DB
             with db() as conn:
                 row = conn.execute(
                     "SELECT id FROM giveaways WHERE message_id=? LIMIT 1",
                     (str(interaction.message.id),)
                 ).fetchone()
             if row:
-                await interaction.response.send_modal(EnterModal(int(row[0])))
+                return await interaction.response.send_modal(EnterModal(int(row[0])))
             else:
-                await interaction.response.send_message(
+                return await interaction.response.send_message(
                     "This giveaway button is stale. Ask an admin to rebind.", ephemeral=True
                 )
     except Exception as e:
@@ -1259,18 +1268,14 @@ async def on_interaction(interaction: discord.Interaction):
 
 @bot.event
 async def on_ready():
-    init_db()
-    purge_bad_cache_rows()
-
-    # debug
+    ensure_db()
     print(f"[wish] DB_PATH={DB_PATH}")
-
-    # ---- try to auto-adopt an existing giveaway post if DB is empty/missing row ----
+    # try auto-adopt
     try:
-        await auto_adopt_open_posts()  # no-op if nothing to adopt
+        await auto_adopt_open_posts()
     except Exception as e:
         print("[wish] auto-adopt failed:", e)
-
+  
     # --- Rebind views to existing OPEN giveaways ---
     with db() as conn:
         rows = conn.execute(
