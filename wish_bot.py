@@ -1149,6 +1149,45 @@ async def rebind_cmd(interaction: discord.Interaction, giveaway_id: int):
 # Startup
 # =========================
 @bot.event
+async def on_interaction(interaction: discord.Interaction):
+    # Only handle button clicks; ignore everything else
+    if interaction.type != discord.InteractionType.component:
+        return
+
+    cid = (interaction.data or {}).get("custom_id", "")
+    if not cid:
+        return
+
+    try:
+        # New buttons (after your change): wish:enter:<gid>
+        if cid.startswith("wish:enter:"):
+            gid = int(cid.split(":")[-1])
+            await interaction.response.send_modal(EnterModal(gid))
+            return
+
+        # Legacy buttons on the old message: wish:enter_btn
+        if cid == "wish:enter_btn":
+            # Map message -> giveaway id from DB
+            with db() as conn:
+                row = conn.execute(
+                    "SELECT id FROM giveaways WHERE message_id=? LIMIT 1",
+                    (str(interaction.message.id),)
+                ).fetchone()
+            if row:
+                await interaction.response.send_modal(EnterModal(int(row[0])))
+            else:
+                await interaction.response.send_message(
+                    "This giveaway button is stale. Ask an admin to rebind.", ephemeral=True
+                )
+    except Exception as e:
+        print(f"[wish] on_interaction fallback error: {e}")
+        try:
+            await interaction.response.send_message("Something went wrong. Try again.", ephemeral=True)
+        except Exception:
+            pass
+
+
+@bot.event
 async def on_ready():
     init_db()
     purge_bad_cache_rows()
