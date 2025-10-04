@@ -837,6 +837,67 @@ async def wish_cmd(interaction: discord.Interaction):
 # =========================
 # Reroll
 # =========================
+@tree.command(name="rebind_link", description="Admin: rebind or adopt a giveaway by message link (hard refresh).")
+@app_commands.describe(
+    message_link="Right-click the stale post → Copy Message Link",
+    duration="If it’s expired, extend from now (e.g., 2d, 24h, 45m). Default 2d."
+)
+async def rebind_link_cmd(
+    interaction: discord.Interaction,
+    message_link: str,
+    duration: str = "2d",
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+
+    # Parse the channel & message IDs from the link
+    m = re.search(r"/channels/\d+/(\d+)/(\d+)$", message_link.strip())
+    if not m:
+        return await interaction.response.send_message("I couldn’t parse that message link.", ephemeral=True)
+    ch_id, msg_id = int(m.group(1)), int(m.group(2))
+
+    # If we already know this message, use its row; otherwise adopt it
+    with db() as conn:
+        row = conn.execute("SELECT id, status FROM giveaways WHERE message_id=?", (str(msg_id),)).fetchone()
+
+    if row:
+        gid, status = int(row[0]), row[1]
+    else:
+        # Adopt minimal row with a future end time
+        try:
+            secs = parse_duration_to_seconds(duration)
+        except Exception as e:
+            return await interaction.response.send_message(f"Invalid duration: {e}", ephemeral=True)
+        end_at_utc = datetime.now(timezone.utc) + timedelta(seconds=secs)
+        gid = giveaway_insert(ch_id, "—", json.dumps({"shops": []}), 1, end_at_utc.isoformat(), interaction.user.id)
+        giveaway_set_message(gid, msg_id)
+
+    # Ensure it is OPEN and has a *future* end time so watcher won’t instantly close it
+    try:
+        secs = parse_duration_to_seconds(duration)
+    except Exception:
+        secs = 48 * 3600  # fallback 2 days
+    new_end = (datetime.now(timezone.utc) + timedelta(seconds=secs)).isoformat()
+
+    with db() as conn:
+        conn.execute("UPDATE giveaways SET status='OPEN', end_at=? WHERE id=?", (new_end, gid))
+
+    # Hard-refresh the actual message you linked
+    ch  = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+    msg = await ch.fetch_message(msg_id)
+    view = EnterButton(gid, disabled=False, timeout=None)
+    try:
+        await msg.edit(view=None)   # clear legacy components
+    except Exception:
+        pass
+    await msg.edit(view=view)       # attach our button
+    bot.add_view(view)              # register handler
+
+    return await interaction.response.send_message(
+        f"✅ Rebound **#{gid}** in <#{ch_id}> (ends {discord.utils.format_dt(datetime.fromisoformat(new_end), style='R')}).",
+        ephemeral=True
+    )
+
 @tree.command(name="reroll", description="Admin: reroll winner(s) for a past giveaway.")
 @app_commands.describe(giveaway_id="Giveaway ID (see bot message or DB)", count="How many new winners (default 1)")
 async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: int = 1):
