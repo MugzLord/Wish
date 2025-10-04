@@ -1153,30 +1153,35 @@ async def on_ready():
     init_db()
     purge_bad_cache_rows()
 
-    # debug (optional but helpful)
+    # (optional) debug
     print(f"[wish] DB_PATH={DB_PATH}")
 
+    # --- Rebind views to existing OPEN giveaways ---
     with db() as conn:
         rows = conn.execute(
             "SELECT id, channel_id, message_id FROM giveaways "
             "WHERE status='OPEN' AND message_id IS NOT NULL AND message_id <> ''"
         ).fetchall()
-    
+
+    print(f"[wish] rebinding views for {len(rows)} giveaway(s)")
+
     for gid, ch_id, msg_id in rows:
-        ch  = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
-        msg = await ch.fetch_message(int(msg_id))
-        view = EnterButton(gid, disabled=False, timeout=None)  # one instance
-        await msg.edit(view=view)                              # attach to message
-        bot.add_view(view)                                     # register persistent handler
+        try:
+            ch  = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+            msg = await ch.fetch_message(int(msg_id))
 
+            view = EnterButton(gid, disabled=False, timeout=None)  # one instance
+            await msg.edit(view=view)                              # attach to message
+            bot.add_view(view)                                     # register persistent handler
 
-        print(f"[wish] rebound view for giveaway #{gid} (msg {msg_id})")
-    except Exception as e:
-        print(f"[wish] rebind failed for gid {gid}: {e}")
+            print(f"[wish] rebound view for giveaway #{gid} (msg {msg_id})")
+        except Exception as e:
+            print(f"[wish] rebind failed for gid {gid}: {e}")
 
-    # unlock stuck draws and start watcher (unchanged)
+    # --- Unlock any stuck draws and start watcher ---
     with db() as conn:
         conn.execute("UPDATE giveaways SET status='OPEN' WHERE status='DRAWING'")
+
     try:
         await tree.sync(guild=None)
         for g in bot.guilds:
@@ -1185,9 +1190,10 @@ async def on_ready():
     except Exception as e:
         print("Slash sync failed:", e)
 
-    # (Removed invalid persistent view registration; we attach views per message.)
     if not giveaway_watcher.is_running():
         giveaway_watcher.start()
+
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
 
 bot.run(TOKEN)
