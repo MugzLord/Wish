@@ -622,10 +622,9 @@ class EnterButton(ui.View):
     def __init__(self, giveaway_id: int, disabled: bool = False, timeout=None):
         super().__init__(timeout=timeout)
         self.gid = giveaway_id
-        self.enter_btn.disabled = disabled
-        # 👇 assign a unique custom_id so Discord knows which handler to use after restarts
         try:
-            self.enter_btn.custom_id = f"wish:enter:{giveaway_id}"
+            self.enter_btn.disabled = disabled
+            self.enter_btn.custom_id = f"wish:enter:{giveaway_id}"   # <-- unique per giveaway
         except Exception:
             pass
 
@@ -636,7 +635,7 @@ class EnterButton(ui.View):
         except Exception as e:
             print(f"[wish] enter_btn error gid={self.gid}: {e}")
             try:
-                await interaction.response.send_message("Something went wrong. Try again later.", ephemeral=True)
+                await interaction.response.send_message("Something went wrong. Try again.", ephemeral=True)
             except Exception:
                 pass
 
@@ -1162,31 +1161,34 @@ async def rebind_cmd(interaction: discord.Interaction, giveaway_id: int):
 @bot.event
 async def on_ready():
     init_db()
-    purge_bad_cache_rows()  # <-- add this line
+    purge_bad_cache_rows()
 
-    # 🔁 Hard rebind: fetch each OPEN giveaway message and reattach the button view
+    # debug (optional but helpful)
+    print(f"[wish] DB_PATH={DB_PATH}")
+
     with db() as conn:
         rows = conn.execute(
             "SELECT id, channel_id, message_id FROM giveaways "
             "WHERE status='OPEN' AND message_id IS NOT NULL AND message_id <> ''"
         ).fetchall()
-    
+    print(f"[wish] rebinding views for {len(rows)} giveaway(s)")
+
     for gid, ch_id, msg_id in rows:
         try:
-            ch = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+            ch  = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
             msg = await ch.fetch_message(int(msg_id))
-            await msg.edit(view=EnterButton(gid, disabled=False, timeout=None))  # <-- direct re-attach
-            bot.add_view(EnterButton(gid, disabled=False, timeout=None))         # <-- keep persistent listener too
-            print(f"[wish] rebound view for giveaway #{gid}")
+
+            view = EnterButton(gid, disabled=False, timeout=None)  # one instance
+            await msg.edit(view=view)                              # attach to message
+            bot.add_view(view)                                     # register persistent handler
+
+            print(f"[wish] rebound view for giveaway #{gid} (msg {msg_id})")
         except Exception as e:
             print(f"[wish] rebind failed for gid {gid}: {e}")
-    
-        
 
-    # 🔧 fail-safe: if a previous draw crashed, unlock it so the watcher can retry
+    # unlock stuck draws and start watcher (unchanged)
     with db() as conn:
         conn.execute("UPDATE giveaways SET status='OPEN' WHERE status='DRAWING'")
-
     try:
         await tree.sync(guild=None)
         for g in bot.guilds:
