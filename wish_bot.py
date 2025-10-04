@@ -622,23 +622,13 @@ class EnterButton(ui.View):
     def __init__(self, giveaway_id: int, disabled: bool = False, timeout=None):
         super().__init__(timeout=timeout)
         self.gid = giveaway_id
-        try:
-            self.enter_btn.disabled = disabled
-            self.enter_btn.custom_id = f"wish:enter:{giveaway_id}"   # <-- unique per giveaway
-        except Exception:
-            pass
+        # make the button route uniquely even after restarts
+        self.enter_btn.custom_id = f"wish:enter:{giveaway_id}"
+        self.enter_btn.disabled = disabled
 
     @ui.button(label="Enter Giveaway", style=discord.ButtonStyle.primary, custom_id="wish:enter_btn")
     async def enter_btn(self, interaction: discord.Interaction, button: ui.Button):
-        try:
-            await interaction.response.send_modal(EnterModal(self.gid))
-        except Exception as e:
-            print(f"[wish] enter_btn error gid={self.gid}: {e}")
-            try:
-                await interaction.response.send_message("Something went wrong. Try again.", ephemeral=True)
-            except Exception:
-                pass
-
+        await interaction.response.send_modal(EnterModal(self.gid))
 
 
 async def update_giveaway_counter_embed(giveaway_id: int):
@@ -1171,16 +1161,14 @@ async def on_ready():
             "SELECT id, channel_id, message_id FROM giveaways "
             "WHERE status='OPEN' AND message_id IS NOT NULL AND message_id <> ''"
         ).fetchall()
-    print(f"[wish] rebinding views for {len(rows)} giveaway(s)")
-
+    
     for gid, ch_id, msg_id in rows:
-        try:
-            ch  = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
-            msg = await ch.fetch_message(int(msg_id))
+        ch  = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+        msg = await ch.fetch_message(int(msg_id))
+        view = EnterButton(gid, disabled=False, timeout=None)  # one instance
+        await msg.edit(view=view)                              # attach to message
+        bot.add_view(view)                                     # register persistent handler
 
-            view = EnterButton(gid, disabled=False, timeout=None)  # one instance
-            await msg.edit(view=view)                              # attach to message
-            bot.add_view(view)                                     # register persistent handler
 
             print(f"[wish] rebound view for giveaway #{gid} (msg {msg_id})")
         except Exception as e:
