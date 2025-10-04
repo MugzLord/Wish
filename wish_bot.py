@@ -897,6 +897,47 @@ async def rebind_link_cmd(
         f"✅ Rebound **#{gid}** in <#{ch_id}> (ends {discord.utils.format_dt(datetime.fromisoformat(new_end), style='R')}).",
         ephemeral=True
     )
+@tree.command(name="rebind_here", description="Admin: rebind/adopt the latest WISH giveaway in this channel.")
+@app_commands.describe(duration="Keep it open from now (e.g., 19h, 1d, 45m). Default 2d.")
+async def rebind_here_cmd(interaction: discord.Interaction, duration: str = "2d"):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+    try:
+        secs = parse_duration_to_seconds(duration)
+    except Exception:
+        secs = 48 * 3600
+    new_end_dt = datetime.now(timezone.utc) + timedelta(seconds=secs)
+
+    # find the latest WISH giveaway embed in this channel
+    ch = interaction.channel
+    target = None
+    async for m in ch.history(limit=50, oldest_first=False):
+        if m.author.id == bot.user.id and m.embeds and (m.embeds[0].title or "").strip() == "⚡ WISH — Giveaway":
+            target = m
+            break
+    if not target:
+        return await interaction.response.send_message("No WISH giveaway message found in this channel.", ephemeral=True)
+
+    with db() as conn:
+        row = conn.execute("SELECT id FROM giveaways WHERE message_id=?", (str(target.id),)).fetchone()
+    if row:
+        gid = int(row[0])
+    else:
+        gid = giveaway_insert(ch.id, "—", json.dumps({"shops": []}), 1, new_end_dt.isoformat(), interaction.user.id)
+        giveaway_set_message(gid, target.id)
+
+    with db() as conn:
+        conn.execute("UPDATE giveaways SET status='OPEN', end_at=? WHERE id=?", (new_end_dt.isoformat(), gid))
+
+    view = EnterButton(gid, disabled=False, timeout=None)
+    await target.edit(view=None)
+    await target.edit(view=view)
+    bot.add_view(view)
+
+    return await interaction.response.send_message(
+        f"✅ Rebound **#{gid}** here. Ends {discord.utils.format_dt(new_end_dt, style='R')}.",
+        ephemeral=True
+    )
 
 
 @tree.command(name="reroll", description="Admin: reroll winner(s) for a past giveaway.")
