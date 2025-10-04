@@ -1170,9 +1170,9 @@ async def on_ready():
         bot.add_view(view)                                     # register persistent handler
 
 
-            print(f"[wish] rebound view for giveaway #{gid} (msg {msg_id})")
-        except Exception as e:
-            print(f"[wish] rebind failed for gid {gid}: {e}")
+        print(f"[wish] rebound view for giveaway #{gid} (msg {msg_id})")
+    except Exception as e:
+        print(f"[wish] rebind failed for gid {gid}: {e}")
 
     # unlock stuck draws and start watcher (unchanged)
     with db() as conn:
