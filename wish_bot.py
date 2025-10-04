@@ -1120,6 +1120,27 @@ async def sync_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Admins only.", ephemeral=True)
     await tree.sync(guild=interaction.guild)
     await interaction.response.send_message("✅ Synced for this server.", ephemeral=True)
+@tree.command(name="rebind", description="Admin: reattach the Enter button to a giveaway message.")
+@app_commands.describe(giveaway_id="The numeric giveaway ID")
+async def rebind_cmd(interaction: discord.Interaction, giveaway_id: int):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("Admins only.", ephemeral=True)
+
+    with db() as conn:
+        row = conn.execute(
+            "SELECT channel_id, message_id, status FROM giveaways WHERE id=?", (giveaway_id,)
+        ).fetchone()
+    if not row:
+        return await interaction.response.send_message("Unknown giveaway ID.", ephemeral=True)
+    ch_id, msg_id, status = int(row[0]), int(row[1] or 0), row[2]
+    if status != "OPEN":
+        return await interaction.response.send_message("That giveaway isn’t OPEN.", ephemeral=True)
+
+    ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+    msg = await ch.fetch_message(msg_id)
+    await msg.edit(view=EnterButton(giveaway_id, disabled=False, timeout=None))
+    bot.add_view(EnterButton(giveaway_id, disabled=False, timeout=None))
+    await interaction.response.send_message("✅ Button reattached.", ephemeral=True)
 
 # =========================
 # Startup
@@ -1129,20 +1150,24 @@ async def on_ready():
     init_db()
     purge_bad_cache_rows()  # <-- add this line
 
-    # 🔁 Reattach the "Enter Giveaway" buttons after a restart
-    # so old giveaway messages don't show "This interaction failed".
+    # 🔁 Hard rebind: fetch each OPEN giveaway message and reattach the button view
     with db() as conn:
         rows = conn.execute(
-            "SELECT id FROM giveaways "
+            "SELECT id, channel_id, message_id FROM giveaways "
             "WHERE status='OPEN' AND message_id IS NOT NULL AND message_id <> ''"
         ).fetchall()
-    for (gid,) in rows:
-        try:
-            bot.add_view(EnterButton(gid, disabled=False, timeout=None))
-        except Exception as e:
-            print(f"[wish] failed to add persistent view for gid {gid}: {e}")
-
     
+    for gid, ch_id, msg_id in rows:
+        try:
+            ch = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
+            msg = await ch.fetch_message(int(msg_id))
+            await msg.edit(view=EnterButton(gid, disabled=False, timeout=None))  # <-- direct re-attach
+            bot.add_view(EnterButton(gid, disabled=False, timeout=None))         # <-- keep persistent listener too
+            print(f"[wish] rebound view for giveaway #{gid}")
+        except Exception as e:
+            print(f"[wish] rebind failed for gid {gid}: {e}")
+    
+        
 
     # 🔧 fail-safe: if a previous draw crashed, unlock it so the watcher can retry
     with db() as conn:
