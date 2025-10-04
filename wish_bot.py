@@ -1129,6 +1129,21 @@ async def on_ready():
     init_db()
     purge_bad_cache_rows()  # <-- add this line
 
+    # 🔁 Reattach the "Enter Giveaway" buttons after a restart
+    # so old giveaway messages don't show "This interaction failed".
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM giveaways "
+            "WHERE status='OPEN' AND message_id IS NOT NULL AND message_id <> ''"
+        ).fetchall()
+    for (gid,) in rows:
+        try:
+            bot.add_view(EnterButton(gid, disabled=False, timeout=None))
+        except Exception as e:
+            print(f"[wish] failed to add persistent view for gid {gid}: {e}")
+
+    
+
     # 🔧 fail-safe: if a previous draw crashed, unlock it so the watcher can retry
     with db() as conn:
         conn.execute("UPDATE giveaways SET status='OPEN' WHERE status='DRAWING'")
