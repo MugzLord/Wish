@@ -1205,6 +1205,7 @@ async def sync_cmd(interaction: discord.Interaction):
         return await interaction.response.send_message("Admins only.", ephemeral=True)
     await tree.sync(guild=interaction.guild)
     await interaction.response.send_message("✅ Synced for this server.", ephemeral=True)
+    
 @tree.command(name="rebind", description="Admin: reattach the Enter button to a giveaway message.")
 @app_commands.describe(giveaway_id="The numeric giveaway ID")
 async def rebind_cmd(interaction: discord.Interaction, giveaway_id: int):
@@ -1218,8 +1219,12 @@ async def rebind_cmd(interaction: discord.Interaction, giveaway_id: int):
     if not row:
         return await interaction.response.send_message("Unknown giveaway ID.", ephemeral=True)
     ch_id, msg_id, status = int(row[0]), int(row[1] or 0), row[2]
+    # Allow reopening so we can rebind
     if status != "OPEN":
-        return await interaction.response.send_message("That giveaway isn’t OPEN.", ephemeral=True)
+        with db() as conn:
+            conn.execute("UPDATE giveaways SET status='OPEN' WHERE id=?", (giveaway_id,))
+        status = "OPEN"
+
 
     ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
     msg = await ch.fetch_message(msg_id)
