@@ -898,6 +898,7 @@ async def rebind_link_cmd(
         ephemeral=True
     )
 
+
 @tree.command(name="reroll", description="Admin: reroll winner(s) for a past giveaway.")
 @app_commands.describe(giveaway_id="Giveaway ID (see bot message or DB)", count="How many new winners (default 1)")
 async def reroll_cmd(interaction: discord.Interaction, giveaway_id: int, count: int = 1):
