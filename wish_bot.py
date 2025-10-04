@@ -229,6 +229,76 @@ def giveaway_count_entries(gid: int) -> int:
         cur = conn.execute("SELECT COUNT(*) FROM giveaway_entries WHERE giveaway_id=?", (gid,))
         return int(cur.fetchone()[0])
 
+ADOPT_TITLE = "⚡ WISH — Giveaway"
+ENDS_RX = re.compile(r"<t:(\d+):[Rr]>")
+WINNERS_LINE_RX = re.compile(r"\*\*Winners:\*\*\s*(\d+)")
+SHOPS_IN_DESC_RX = re.compile(r'manufacturers_id=(\d+)')
+
+async def auto_adopt_open_posts():
+    """Recreate a missing DB row by scanning the channel for our existing giveaway post."""
+    if not GIVEAWAY_CHANNEL_ID:
+        return  # we need a channel to look in
+
+    ch = bot.get_channel(GIVEAWAY_CHANNEL_ID) or await bot.fetch_channel(GIVEAWAY_CHANNEL_ID)
+    if not ch:
+        return
+
+    async for msg in ch.history(limit=50, oldest_first=False):
+        # Only messages from this bot with our embed title
+        if msg.author.id != bot.user.id or not msg.embeds:
+            continue
+        e = msg.embeds[0]
+        if (e.title or "").strip() != ADOPT_TITLE:
+            continue
+
+        # If DB already knows this message, skip
+        with db() as conn:
+            row = conn.execute("SELECT id FROM giveaways WHERE message_id=?", (str(msg.id),)).fetchone()
+        if row:
+            continue
+
+        # Parse bits from the embed description
+        desc = e.description or ""
+        # 1) end time from <t:epoch:R>
+        m_end = ENDS_RX.search(desc)
+        if not m_end:
+            continue
+        end_epoch = int(m_end.group(1))
+        end_at_utc = datetime.fromtimestamp(end_epoch, tz=timezone.utc)
+
+        # 2) winners
+        m_win = WINNERS_LINE_RX.search(desc)
+        winners_n = int(m_win.group(1)) if m_win else 1
+        winners_n = max(1, winners_n)
+
+        # 3) prize (store raw line, formatting doesn’t matter for DB)
+        prize = "—"
+        for line in desc.splitlines():
+            if line.strip().startswith("**Prize:**"):
+                prize = line.split("**Prize:**", 1)[-1].strip()
+                break
+
+        # 4) shops (IDs from desc)
+        shop_ids = SHOPS_IN_DESC_RX.findall(desc) or re.findall(r"\b(\d{5,})\b", desc)
+        shop_ids = list(dict.fromkeys(shop_ids))
+
+        # Insert row + link to message
+        gid = giveaway_insert(ch.id, prize, json.dumps({"shops": shop_ids}), winners_n, end_at_utc.isoformat(), bot.user.id)
+        giveaway_set_message(gid, msg.id)
+        set_giveaway_shops(gid, shop_ids)
+
+        # Reattach the button
+        view = EnterButton(gid, disabled=False, timeout=None)
+        try:
+            await msg.edit(view=view)
+        except Exception:
+            pass
+        bot.add_view(view)
+
+        print(f"[wish] auto-adopted message {msg.id} as giveaway #{gid}")
+        break  # adopt the first match only
+
+
 # helper to get unique entrant user IDs for a giveaway
 def giveaway_entry_user_ids(gid: int) -> List[int]:
     with db() as conn:
@@ -1192,8 +1262,14 @@ async def on_ready():
     init_db()
     purge_bad_cache_rows()
 
-    # (optional) debug
+    # debug
     print(f"[wish] DB_PATH={DB_PATH}")
+
+    # ---- try to auto-adopt an existing giveaway post if DB is empty/missing row ----
+    try:
+        await auto_adopt_open_posts()  # no-op if nothing to adopt
+    except Exception as e:
+        print("[wish] auto-adopt failed:", e)
 
     # --- Rebind views to existing OPEN giveaways ---
     with db() as conn:
@@ -1233,6 +1309,7 @@ async def on_ready():
         giveaway_watcher.start()
 
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
 
 
 bot.run(TOKEN)
