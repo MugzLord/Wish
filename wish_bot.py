@@ -623,26 +623,23 @@ class EnterButton(ui.View):
         super().__init__(timeout=timeout)
         self.gid = giveaway_id
         self.enter_btn.disabled = disabled
-        # 👇 ensure unique id per giveaway
+        # 👇 assign a unique custom_id so Discord knows which handler to use after restarts
         try:
             self.enter_btn.custom_id = f"wish:enter:{giveaway_id}"
         except Exception:
-            pass  # safe on first run
-
-
-   # @ui.button(label="Enter Giveaway", style=discord.ButtonStyle.primary, custom_id="wish:enter_btn")
-    #async def enter_btn(self, interaction: discord.Interaction, button: ui.Button):
-        #await interaction.response.send_modal(EnterModal(self.gid))
-@ui.button(label="Enter Giveaway", style=discord.ButtonStyle.primary, custom_id="wish:enter_btn")
-async def enter_btn(self, interaction: discord.Interaction, button: ui.Button):
-    try:
-        await interaction.response.send_modal(EnterModal(self.gid))
-    except Exception as e:
-        print(f"[wish] enter_btn error gid={self.gid}: {e}")
-        try:
-            await interaction.response.send_message("Something went wrong — try again.", ephemeral=True)
-        except Exception:
             pass
+
+    @ui.button(label="Enter Giveaway", style=discord.ButtonStyle.primary, custom_id="wish:enter_btn")
+    async def enter_btn(self, interaction: discord.Interaction, button: ui.Button):
+        try:
+            await interaction.response.send_modal(EnterModal(self.gid))
+        except Exception as e:
+            print(f"[wish] enter_btn error gid={self.gid}: {e}")
+            try:
+                await interaction.response.send_message("Something went wrong. Try again later.", ephemeral=True)
+            except Exception:
+                pass
+
 
 
 async def update_giveaway_counter_embed(giveaway_id: int):
