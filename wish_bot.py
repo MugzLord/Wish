@@ -1226,11 +1226,20 @@ async def rebind_cmd(interaction: discord.Interaction, giveaway_id: int):
         status = "OPEN"
 
 
-    ch = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
+    ch  = bot.get_channel(ch_id) or await bot.fetch_channel(ch_id)
     msg = await ch.fetch_message(msg_id)
-    await msg.edit(view=EnterButton(giveaway_id, disabled=False, timeout=None))
-    bot.add_view(EnterButton(giveaway_id, disabled=False, timeout=None))
-    await interaction.response.send_message("✅ Button reattached.", ephemeral=True)
+
+    # HARD refresh: remove any old components, then attach ONE persistent view
+    view = EnterButton(giveaway_id, disabled=False, timeout=None)
+    try:
+        await msg.edit(view=None)      # <- clears legacy rows/buttons
+    except Exception:
+        pass
+    await msg.edit(view=view)          # <- attaches our new button
+    bot.add_view(view)                 # <- registers same instance for persistence
+
+    await interaction.response.send_message("✅ Button reattached (hard refresh).", ephemeral=True)
+
 
 # =========================
 # Startup
