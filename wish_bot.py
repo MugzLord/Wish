@@ -332,7 +332,7 @@ def list_giveaway_winners(gid: int) -> List[int]:
 def imvu_profile_link(username: str) -> str:
     u = (username or "").strip()
     u_safe = re.sub(r"[^A-Za-z0-9_.-]", "", u)
-    return f"https://www.imvu.com/next/av/{u_safe}/"
+    return f"https://go.imvu.com/av/{u_safe}"
     
 def purge_bad_cache_rows():
     with db() as conn:
